@@ -527,7 +527,7 @@ static void menu_display_statusline(struct menu *m)
 	menu = entry->menu;
 
 	bootmenu_print_frame_line(1);
-	bootmenu_print_frame_title(2, "U-Boot Boot Menu");
+	bootmenu_print_frame_title(2, "Towed-Boot Menu");
 	bootmenu_print_frame_line(3);
 
 	/* First 3 lines are bootmenu header + 2 empty lines between entries */

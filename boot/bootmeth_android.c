@@ -188,7 +188,7 @@ static int scan_boot_part_name(struct udevice *blk, struct android_priv *priv,
 
 		if (is_arm64_u_boot_image(kernel_buf + kernel_block_offset,
 					  bufsz - kernel_block_offset)) {
-			log_debug("%s contains a U-Boot payload\n", partname);
+			log_debug("%s contains a Towed-Boot payload\n", partname);
 			free(kernel_buf);
 			free(buf);
 			return log_msg_ret("u-boot payload", -ENOENT);

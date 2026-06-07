@@ -142,7 +142,7 @@ static void fastboot_print_android_boot(const char *part_name,
 	u32 boot_img_size;
 
 	if (fastboot_android_boot_has_u_boot(buffer, download_bytes)) {
-		printf("Towed-Boot: %s contains a U-Boot payload; Android autoboot will ignore it\n",
+		printf("Towed-Boot: %s contains a Towed-Boot payload; Android autoboot will ignore it\n",
 		       part_name);
 		return;
 	}
