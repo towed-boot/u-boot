@@ -10,11 +10,63 @@
 #include <console.h>
 #include <g_dnl.h>
 #include <fastboot.h>
+#include <ansi.h>
 #include <net.h>
 #include <usb.h>
 #include <watchdog.h>
 #include <linux/printk.h>
 #include <linux/stringify.h>
+
+#define FASTBOOT_FRAME_COL	3
+#define FASTBOOT_FRAME_WIDTH	56
+
+static void fastboot_screen_line(int row, const char *text)
+{
+	int text_len = strlen(text);
+	int padding = FASTBOOT_FRAME_WIDTH - text_len - 4;
+
+	printf(ANSI_CURSOR_POSITION, row, FASTBOOT_FRAME_COL);
+	printf("| %s", text);
+	while (padding-- > 0)
+		putc(' ');
+	puts(" |");
+}
+
+static void fastboot_screen_border(int row)
+{
+	int i;
+
+	printf(ANSI_CURSOR_POSITION, row, FASTBOOT_FRAME_COL);
+	putc('+');
+	for (i = 0; i < FASTBOOT_FRAME_WIDTH - 2; i++)
+		putc('-');
+	putc('+');
+}
+
+static void fastboot_show_screen(void)
+{
+	if (!IS_ENABLED(CONFIG_TOWED_BOOT_ANDROID))
+		return;
+
+	puts(ANSI_CURSOR_HIDE);
+	puts(ANSI_CLEAR_CONSOLE);
+	fastboot_screen_border(2);
+	fastboot_screen_line(3, "Towed-Boot Fastboot");
+	fastboot_screen_border(4);
+	fastboot_screen_line(5, "");
+	fastboot_screen_line(6, "> USB fastboot");
+	fastboot_screen_line(7, "  Waiting for a host connection");
+	fastboot_screen_line(8, "");
+	fastboot_screen_line(9, "  CTRL-C returns to the boot menu");
+	fastboot_screen_line(10, "");
+	fastboot_screen_border(11);
+}
+
+static void fastboot_leave_screen(void)
+{
+	if (IS_ENABLED(CONFIG_TOWED_BOOT_ANDROID))
+		puts(ANSI_CURSOR_SHOW);
+}
 
 #if CONFIG_IS_ENABLED(NET_LEGACY)
 static int do_fastboot_udp(int argc, char *const argv[],
@@ -88,10 +140,13 @@ static int do_fastboot_usb(int argc, char *const argv[],
 		return CMD_RET_FAILURE;
 	}
 
+	fastboot_show_screen();
 	g_dnl_clear_detach();
 	ret = g_dnl_register("usb_dnl_fastboot");
-	if (ret)
+	if (ret) {
+		fastboot_leave_screen();
 		return ret;
+	}
 
 	if (!g_dnl_board_usb_cable_connected()) {
 		puts("\rUSB cable not detected.\n" \
@@ -115,6 +170,7 @@ exit:
 	udc_device_put(udc);
 	g_dnl_unregister();
 	g_dnl_clear_detach();
+	fastboot_leave_screen();
 
 	return ret;
 }
