@@ -17,6 +17,8 @@
 
 #define GCC_SE12_UART_RCG_REG 0x184D0
 #define GCC_SDCC2_APPS_CLK_SRC_REG 0x1400c
+#define GCC_USB30_PRIM_MASTER_CMD_RCGR 0xf020
+#define GCC_USB30_PRIM_MOCK_UTMI_CMD_RCGR 0xf038
 
 #define APCS_GPLL9_STATUS 0x1c000
 #define APCS_GPLLX_ENA_REG 0x52018
@@ -44,6 +46,15 @@ static const struct freq_tbl ftbl_gcc_sdcc2_apps_clk_src[] = {
 	F(50000000, CFG_CLK_SRC_GPLL0_EVEN, 6, 0, 0),
 	F(100000000, CFG_CLK_SRC_GPLL0, 6, 0, 0),
 	F(202000000, CFG_CLK_SRC_GPLL9, 4, 0, 0),
+	{}
+};
+
+static const struct freq_tbl ftbl_gcc_usb30_prim_master_clk_src[] = {
+	F(33333333, CFG_CLK_SRC_GPLL0_EVEN, 9, 0, 0),
+	F(66666667, CFG_CLK_SRC_GPLL0_EVEN, 4.5, 0, 0),
+	F(133333333, CFG_CLK_SRC_GPLL0, 4.5, 0, 0),
+	F(200000000, CFG_CLK_SRC_GPLL0, 3, 0, 0),
+	F(240000000, CFG_CLK_SRC_GPLL0, 2.5, 0, 0),
 	{}
 };
 
@@ -84,6 +95,20 @@ static ulong sm8250_set_rate(struct clk *clk, ulong rate)
 				     CFG_CLK_SRC_GPLL9, 8);
 
 		return rate;
+	case GCC_USB30_PRIM_MASTER_CLK:
+		freq = qcom_find_freq(ftbl_gcc_usb30_prim_master_clk_src, rate);
+		clk_rcg_set_rate_mnd(priv->base,
+				     GCC_USB30_PRIM_MASTER_CMD_RCGR,
+				     freq->pre_div, freq->m, freq->n,
+				     freq->src, 8);
+		return freq->freq;
+	case GCC_USB30_PRIM_MOCK_UTMI_CLK:
+		WARN(rate != 19200000,
+		     "Unexpected USB30 mock UTMI rate: %lu\n", rate);
+		clk_rcg_set_rate(priv->base,
+				 GCC_USB30_PRIM_MOCK_UTMI_CMD_RCGR,
+				 0, CFG_CLK_SRC_CXO);
+		return 19200000;
 	default:
 		return 0;
 	}
