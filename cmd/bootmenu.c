@@ -20,6 +20,12 @@
 /* maximum bootmenu entries */
 #define MAX_COUNT	99
 
+#define BOOTMENU_FRAME_COL	3
+#define BOOTMENU_FRAME_WIDTH	56
+#define BOOTMENU_ENTRY_ROW	4
+#define BOOTMENU_ENTRY_COL	5
+#define BOOTMENU_HINT_COL	5
+
 /* maximal size of bootmenu env
  *  9 = strlen("bootmenu_")
  *  2 = strlen(MAX_COUNT)
@@ -62,21 +68,62 @@ static char *bootmenu_getoption(unsigned short int n)
 	return env_get(name);
 }
 
+static void bootmenu_clear_row(int row)
+{
+	printf(ANSI_CURSOR_POSITION, row, 1);
+	puts(ANSI_CLEAR_LINE);
+}
+
+static void bootmenu_print_frame_line(int row)
+{
+	int i;
+
+	bootmenu_clear_row(row);
+	printf(ANSI_CURSOR_POSITION, row, BOOTMENU_FRAME_COL);
+	putc('+');
+	for (i = 0; i < BOOTMENU_FRAME_WIDTH - 2; i++)
+		putc('-');
+	putc('+');
+}
+
+static void bootmenu_print_frame_title(int row, const char *title)
+{
+	int len = strlen(title);
+	int inner = BOOTMENU_FRAME_WIDTH - 2;
+	int left = (inner - len) / 2;
+	int right = inner - len - left;
+	int i;
+
+	bootmenu_clear_row(row);
+	printf(ANSI_CURSOR_POSITION, row, BOOTMENU_FRAME_COL);
+	putc('|');
+
+	for (i = 0; i < left; i++)
+		putc(' ');
+	puts(title);
+	for (i = 0; i < right; i++)
+		putc(' ');
+
+	putc('|');
+}
+
 static void bootmenu_print_entry(void *data)
 {
 	struct bootmenu_entry *entry = data;
 	int reverse = (entry->menu->active == entry->num);
+	int row = entry->num + BOOTMENU_ENTRY_ROW;
 
 	/*
-	 * Move cursor to line where the entry will be drown (entry->num)
+	 * Move cursor to line where the entry will be drawn (entry->num)
 	 * First 3 lines contain bootmenu header + 1 empty line
 	 */
-	printf(ANSI_CURSOR_POSITION, entry->num + 4, 7);
+	bootmenu_clear_row(row);
+	printf(ANSI_CURSOR_POSITION, row, BOOTMENU_ENTRY_COL);
 
 	if (reverse)
 		puts(ANSI_COLOR_REVERSE);
 
-	printf("%s", entry->title);
+	printf("%c %s", reverse ? '>' : ' ', entry->title);
 
 	if (reverse)
 		puts(ANSI_COLOR_RESET);
@@ -479,22 +526,18 @@ static void menu_display_statusline(struct menu *m)
 
 	menu = entry->menu;
 
-	printf(ANSI_CURSOR_POSITION, 1, 1);
-	puts(ANSI_CLEAR_LINE);
-	printf(ANSI_CURSOR_POSITION, 2, 3);
-	puts("*** U-Boot Boot Menu ***");
-	puts(ANSI_CLEAR_LINE_TO_END);
-	printf(ANSI_CURSOR_POSITION, 3, 1);
-	puts(ANSI_CLEAR_LINE);
+	bootmenu_print_frame_line(1);
+	bootmenu_print_frame_title(2, "U-Boot Boot Menu");
+	bootmenu_print_frame_line(3);
 
 	/* First 3 lines are bootmenu header + 2 empty lines between entries */
-	printf(ANSI_CURSOR_POSITION, menu->count + 5, 1);
-	puts(ANSI_CLEAR_LINE);
-	printf(ANSI_CURSOR_POSITION, menu->count + 6, 3);
-	puts("Press UP/DOWN to move, ENTER to select, ESC to quit");
-	puts(ANSI_CLEAR_LINE_TO_END);
-	printf(ANSI_CURSOR_POSITION, menu->count + 7, 1);
-	puts(ANSI_CLEAR_LINE);
+	bootmenu_print_frame_line(menu->count + 4);
+	bootmenu_clear_row(menu->count + 5);
+	bootmenu_clear_row(menu->count + 6);
+	printf(ANSI_CURSOR_POSITION, menu->count + 6, BOOTMENU_HINT_COL);
+	puts("UP/DOWN move  ENTER select  ESC quit");
+	bootmenu_print_frame_line(menu->count + 7);
+	bootmenu_clear_row(menu->count + 8);
 }
 
 static void handle_uefi_bootnext(void)
