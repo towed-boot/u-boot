@@ -13,13 +13,196 @@
 #include <image-sparse.h>
 #include <image.h>
 #include <log.h>
+#include <malloc.h>
 #include <part.h>
 #include <mmc.h>
 #include <div64.h>
 #include <linux/compat.h>
+#include <linux/string.h>
 #include <android_image.h>
 
 #define BOOT_PARTITION_NAME "boot"
+
+static bool fastboot_towed_boot_is_boot_partition(const char *part_name)
+{
+	if (!strcmp(part_name, "boot"))
+		return true;
+
+	return (!strcmp(part_name, "boot_a") || !strcmp(part_name, "boot_b"));
+}
+
+static int fastboot_mmc_read_part(struct blk_desc *dev_desc,
+				  struct disk_partition *info, u64 offset,
+				  void *buffer, u32 bytes)
+{
+	u64 partition_size = (u64)info->size * info->blksz;
+	uint block_offset;
+	lbaint_t start;
+	lbaint_t blkcnt;
+	void *bounce;
+	int ret;
+
+	if (offset > partition_size || bytes > partition_size - offset)
+		return -EINVAL;
+
+	block_offset = do_div(offset, info->blksz);
+	start = info->start + offset;
+	blkcnt = DIV_ROUND_UP(block_offset + bytes, info->blksz);
+
+	bounce = malloc(blkcnt * info->blksz);
+	if (!bounce)
+		return -ENOMEM;
+
+	ret = blk_dread(dev_desc, start, blkcnt, bounce);
+	if (ret != blkcnt) {
+		free(bounce);
+		return -EIO;
+	}
+
+	memcpy(buffer, (u8 *)bounce + block_offset, bytes);
+	free(bounce);
+
+	return 0;
+}
+
+static int fastboot_mmc_read_part_aligned(struct blk_desc *dev_desc,
+					  struct disk_partition *info,
+					  u64 offset, void *buffer,
+					  u32 bytes)
+{
+	lbaint_t blkcnt;
+
+	if (offset % info->blksz || bytes % info->blksz)
+		return -EINVAL;
+
+	blkcnt = bytes / info->blksz;
+	if (blk_dread(dev_desc, info->start + offset / info->blksz, blkcnt,
+		      buffer) != blkcnt)
+		return -EIO;
+
+	return 0;
+}
+
+static bool fastboot_towed_boot_android_v2(const void *buffer, u32 size,
+					   u32 *boot_img_size)
+{
+	const struct andr_boot_img_hdr_v0 *hdr = buffer;
+
+	if (!is_android_boot_image_header(buffer) || hdr->header_version > 2)
+		return false;
+
+	if (!android_image_get_bootimg_size(buffer, boot_img_size))
+		return false;
+
+	return !size || *boot_img_size <= size;
+}
+
+static bool fastboot_mmc_part_contains_towed_boot(struct blk_desc *dev_desc,
+						  struct disk_partition *info,
+						  const void *hdr)
+{
+	const struct andr_boot_img_hdr_v0 *boot_hdr = hdr;
+	u8 kernel_header[0x60];
+
+	if (!is_android_boot_image_header(hdr) || boot_hdr->header_version > 2)
+		return false;
+
+	if (fastboot_mmc_read_part(dev_desc, info, boot_hdr->page_size,
+				   kernel_header, sizeof(kernel_header)))
+		return false;
+
+	return is_arm64_u_boot_image(kernel_header, sizeof(kernel_header));
+}
+
+static bool fastboot_mmc_try_wrap_towed_boot(struct blk_desc *dev_desc,
+					     struct disk_partition *info,
+					     const char *part_name,
+					     void *download_buffer,
+					     u32 download_bytes,
+					     char *response)
+{
+	struct andr_boot_img_hdr_v0 current_hdr;
+	u32 current_size, payload_size;
+	u64 payload_offset, write_size, write_blks;
+	u64 partition_size = (u64)info->size * info->blksz;
+	void *payload_header;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_TOWED_BOOT_ANDROID))
+		return false;
+
+	if (!fastboot_towed_boot_is_boot_partition(part_name))
+		return false;
+
+	if (!fastboot_towed_boot_android_v2(download_buffer, download_bytes,
+					    &payload_size))
+		return false;
+
+	if (android_boot_image_has_arm64_u_boot(download_buffer, download_bytes))
+		return false;
+
+	ret = fastboot_mmc_read_part(dev_desc, info, 0, &current_hdr,
+				     sizeof(current_hdr));
+	if (ret)
+		return false;
+
+	if (!fastboot_towed_boot_android_v2(&current_hdr, 0, &current_size))
+		return false;
+
+	if (!fastboot_mmc_part_contains_towed_boot(dev_desc, info, &current_hdr))
+		return false;
+
+	payload_offset = ALIGN((u64)current_size +
+			       TOWED_BOOT_ANDROID_PAYLOAD_HEADER_SIZE,
+			       current_hdr.page_size);
+	write_size = payload_offset + payload_size;
+	write_blks = DIV_ROUND_UP(write_size, info->blksz);
+
+	if (payload_offset > U32_MAX || write_size > partition_size ||
+	    write_size > U32_MAX) {
+		fastboot_fail("hybrid boot image too large", response);
+		return true;
+	}
+
+	if (write_blks * info->blksz > fastboot_buf_size) {
+		fastboot_fail("fastboot buffer too small for hybrid boot image",
+			      response);
+		return true;
+	}
+
+	memmove((u8 *)download_buffer + payload_offset, download_buffer,
+		payload_size);
+
+	ret = fastboot_mmc_read_part_aligned(dev_desc, info, 0, download_buffer,
+					     current_size);
+	if (ret) {
+		fastboot_fail("failed to read current Towed-Boot image",
+			      response);
+		return true;
+	}
+
+	payload_header = (u8 *)download_buffer + current_size;
+	towed_boot_android_payload_init(payload_header, (u32)payload_offset,
+					payload_size);
+
+	if (payload_offset > current_size + TOWED_BOOT_ANDROID_PAYLOAD_HEADER_SIZE)
+		memset((u8 *)download_buffer + current_size +
+		       TOWED_BOOT_ANDROID_PAYLOAD_HEADER_SIZE, 0,
+		       payload_offset - current_size -
+		       TOWED_BOOT_ANDROID_PAYLOAD_HEADER_SIZE);
+
+	if (write_blks * info->blksz > write_size)
+		memset((u8 *)download_buffer + write_size, 0,
+		       write_blks * info->blksz - write_size);
+
+	printf("Towed-Boot: injecting into %s Android boot image\n",
+	       part_name);
+	fastboot_block_write_raw_image(dev_desc, info, part_name,
+				       download_buffer, (u32)write_size,
+				       response);
+
+	return true;
+}
 
 static int raw_part_get_info_by_name(struct blk_desc *dev_desc,
 				     const char *name,
@@ -470,6 +653,12 @@ void fastboot_mmc_flash_write(const char *cmd, void *download_buffer,
 		fastboot_block_write_sparse_image(dev_desc, &info, cmd,
 						  download_buffer, response);
 	} else {
+		if (fastboot_mmc_try_wrap_towed_boot(dev_desc, &info, cmd,
+						     download_buffer,
+						     download_bytes,
+						     response))
+			return;
+
 		fastboot_towed_boot_flash_probe(cmd, download_buffer,
 						download_bytes);
 		fastboot_block_write_raw_image(dev_desc, &info, cmd, download_buffer,

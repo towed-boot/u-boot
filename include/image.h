@@ -2032,6 +2032,36 @@ bool is_android_boot_image_header(const void *hdr);
 bool is_arm64_u_boot_image(const void *buffer, size_t size);
 
 /**
+ * android_boot_image_has_arm64_u_boot() - Check Android kernel payload
+ *
+ * @buffer: Pointer to Android boot image data
+ * @size: Number of available bytes
+ * Return: true if the Android boot image kernel is an ARM64 U-Boot image
+ */
+bool android_boot_image_has_arm64_u_boot(const void *buffer, size_t size);
+
+/**
+ * towed_boot_android_payload_init() - Initialize hybrid Android payload header
+ *
+ * @header: Pointer to a TOWED_BOOT_ANDROID_PAYLOAD_HEADER_SIZE buffer
+ * @payload_offset: Partition-relative Android payload offset
+ * @payload_size: Android payload size
+ */
+void towed_boot_android_payload_init(void *header, u32 payload_offset,
+				     u32 payload_size);
+
+/**
+ * towed_boot_android_payload_get() - Parse hybrid Android payload header
+ *
+ * @header: Pointer to Towed-Boot Android payload header
+ * @payload_offset: Returns partition-relative Android payload offset
+ * @payload_size: Returns Android payload size
+ * Return: true if the header is valid
+ */
+bool towed_boot_android_payload_get(const void *header, u32 *payload_offset,
+				    u32 *payload_size);
+
+/**
  * is_android_vendor_boot_image_header() - Check the magic of vendor boot image
  *
  * This checks the header of Android vendor boot image and verifies the magic

@@ -18,6 +18,7 @@
 #include <bootm.h>
 #include <bootmeth.h>
 #include <dm.h>
+#include <div64.h>
 #include <env.h>
 #include <image.h>
 #include <malloc.h>
@@ -51,6 +52,7 @@ struct android_priv {
 	char boot_part[PART_NAME_LEN];
 	char vendor_boot_part[PART_NAME_LEN];
 	u32 header_version;
+	u32 boot_img_offset;
 	u32 boot_img_size;
 	u32 vendor_boot_img_size;
 };
@@ -117,6 +119,99 @@ static bool android_part_is_slotted(const char *partname, const char *base,
 	slot[1] = '\0';
 
 	return true;
+}
+
+static int android_read_part_bytes(struct udevice *blk,
+				   const struct disk_partition *partition,
+				   u64 offset, void *buffer, u32 bytes)
+{
+	struct blk_desc *desc = dev_get_uclass_plat(blk);
+	u64 partition_size = (u64)partition->size * desc->blksz;
+	uint block_offset;
+	lbaint_t start;
+	lbaint_t blkcnt;
+	void *bounce;
+	int ret;
+
+	if (offset > partition_size || bytes > partition_size - offset)
+		return -EINVAL;
+
+	block_offset = do_div(offset, desc->blksz);
+	start = partition->start + offset;
+	blkcnt = DIV_ROUND_UP(block_offset + bytes, desc->blksz);
+
+	bounce = malloc(blkcnt * desc->blksz);
+	if (!bounce)
+		return -ENOMEM;
+
+	ret = blk_read(blk, start, blkcnt, bounce);
+	if (ret != blkcnt) {
+		free(bounce);
+		return -EIO;
+	}
+
+	memcpy(buffer, (u8 *)bounce + block_offset, bytes);
+	free(bounce);
+
+	return 0;
+}
+
+static int scan_towed_android_payload(struct udevice *blk,
+				      struct android_priv *priv,
+				      const struct disk_partition *partition,
+				      u32 outer_size)
+{
+	struct blk_desc *desc = dev_get_uclass_plat(blk);
+	struct andr_boot_img_hdr_v0 *payload_boot_hdr;
+	u32 payload_offset, payload_size, payload_boot_img_size;
+	u64 partition_size = (u64)partition->size * desc->blksz;
+	char *payload_hdr;
+	ulong num_blks, bufsz;
+	int ret;
+
+	payload_hdr = malloc(TOWED_BOOT_ANDROID_PAYLOAD_HEADER_SIZE);
+	if (!payload_hdr)
+		return -ENOMEM;
+
+	ret = android_read_part_bytes(blk, partition, outer_size, payload_hdr,
+				      TOWED_BOOT_ANDROID_PAYLOAD_HEADER_SIZE);
+	if (ret ||
+	    !towed_boot_android_payload_get(payload_hdr, &payload_offset,
+					    &payload_size)) {
+		free(payload_hdr);
+		return -ENOENT;
+	}
+
+	free(payload_hdr);
+
+	if (payload_offset % desc->blksz || payload_offset > partition_size ||
+	    payload_size > partition_size - payload_offset)
+		return -EINVAL;
+
+	num_blks = DIV_ROUND_UP(sizeof(*payload_boot_hdr), desc->blksz);
+	bufsz = num_blks * desc->blksz;
+	payload_boot_hdr = malloc(bufsz);
+	if (!payload_boot_hdr)
+		return -ENOMEM;
+
+	ret = android_read_part_bytes(blk, partition, payload_offset,
+				      payload_boot_hdr, sizeof(*payload_boot_hdr));
+	if (ret ||
+	    !is_android_boot_image_header(payload_boot_hdr) ||
+	    payload_boot_hdr->header_version > 2 ||
+	    !android_image_get_bootimg_size(payload_boot_hdr,
+					    &payload_boot_img_size) ||
+	    payload_boot_img_size > payload_size) {
+		free(payload_boot_hdr);
+		return -EINVAL;
+	}
+
+	priv->header_version = payload_boot_hdr->header_version;
+	priv->boot_img_offset = payload_offset;
+	priv->boot_img_size = payload_boot_img_size;
+	free(payload_boot_hdr);
+
+	return 0;
 }
 
 static int scan_boot_part_name(struct udevice *blk, struct android_priv *priv,
@@ -188,16 +283,23 @@ static int scan_boot_part_name(struct udevice *blk, struct android_priv *priv,
 
 		if (is_arm64_u_boot_image(kernel_buf + kernel_block_offset,
 					  bufsz - kernel_block_offset)) {
-			log_debug("%s contains a Towed-Boot payload\n", partname);
+			ret = scan_towed_android_payload(blk, priv, &partition,
+							 priv->boot_img_size);
 			free(kernel_buf);
-			free(buf);
-			return log_msg_ret("u-boot payload", -ENOENT);
+			if (ret) {
+				free(buf);
+				return log_msg_ret("u-boot payload", ret);
+			}
+
+			goto found;
 		}
 
 		free(kernel_buf);
 	}
 
 	priv->header_version = header_version;
+	priv->boot_img_offset = 0;
+found:
 	strlcpy(priv->boot_part, partname, sizeof(priv->boot_part));
 	priv->boot_part_slotted = android_part_is_slotted(partname,
 							  BOOT_PART_NAME,
@@ -511,7 +613,7 @@ static int android_read_file(struct udevice *dev, struct bootflow *bflow,
  * Return: 0 if OK, negative errno on failure.
  */
 static int read_partition(struct blk_desc *desc, const char *const partname,
-			  ulong image_size, ulong addr)
+			  ulong image_offset, ulong image_size, ulong addr)
 {
 	struct disk_partition partition;
 	ulong num_blks = DIV_ROUND_UP(image_size, desc->blksz);
@@ -522,7 +624,11 @@ static int read_partition(struct blk_desc *desc, const char *const partname,
 	if (ret < 0)
 		return log_msg_ret("part", ret);
 
-	n = blk_dread(desc, partition.start, num_blks, map_sysmem(addr, 0));
+	if (image_offset % desc->blksz)
+		return log_msg_ret("part offset", -EINVAL);
+
+	n = blk_dread(desc, partition.start + image_offset / desc->blksz,
+		      num_blks, map_sysmem(addr, 0));
 	if (n < num_blks)
 		return log_msg_ret("part read", -EIO);
 
@@ -703,13 +809,13 @@ static int boot_android_normal(struct bootflow *bflow)
 	if (ret < 0)
 		return log_msg_ret("read slot", ret);
 
-	ret = read_partition(desc, priv->boot_part, priv->boot_img_size,
-			     loadaddr);
+	ret = read_partition(desc, priv->boot_part, priv->boot_img_offset,
+			     priv->boot_img_size, loadaddr);
 	if (ret < 0)
 		return log_msg_ret("read boot", ret);
 
 	if (priv->header_version >= 3) {
-		ret = read_partition(desc, priv->vendor_boot_part,
+		ret = read_partition(desc, priv->vendor_boot_part, 0,
 				     priv->vendor_boot_img_size, vloadaddr);
 		if (ret < 0)
 			return log_msg_ret("read vendor_boot", ret);

@@ -15,8 +15,21 @@
 
 #define ANDROID_IMAGE_DEFAULT_KERNEL_ADDR	0x10008000
 #define ANDROID_IMAGE_DEFAULT_RAMDISK_ADDR	0x11000000
+#define TOWED_BOOT_ANDROID_PAYLOAD_MAGIC	"TOWEDBOOTANDRV1"
+#define TOWED_BOOT_ANDROID_PAYLOAD_VERSION	1
+#define TOWED_BOOT_ANDROID_PAYLOAD_MAGIC_SIZE	16
+#define TOWED_BOOT_ANDROID_PAYLOAD_VERSION_OFF	16
+#define TOWED_BOOT_ANDROID_PAYLOAD_HDR_SIZE_OFF	20
+#define TOWED_BOOT_ANDROID_PAYLOAD_OFFSET_OFF	24
+#define TOWED_BOOT_ANDROID_PAYLOAD_SIZE_OFF	28
 
 static char andr_tmp_str[ANDR_BOOT_ARGS_SIZE + 1];
+
+static bool android_boot_image_v0_v1_v2_page_size_valid(const struct andr_boot_img_hdr_v0 *hdr)
+{
+	return hdr->page_size >= sizeof(*hdr) &&
+	       !(hdr->page_size & (hdr->page_size - 1));
+}
 
 static ulong checksum(const unsigned char *buffer, ulong size)
 {
@@ -241,10 +254,14 @@ bool android_image_get_bootimg_size(const void *hdr, u32 *boot_img_size)
 		return false;
 	}
 
-	if (((struct andr_boot_img_hdr_v0 *)hdr)->header_version <= 2)
+	if (((struct andr_boot_img_hdr_v0 *)hdr)->header_version <= 2) {
+		if (!android_boot_image_v0_v1_v2_page_size_valid(hdr))
+			return false;
+
 		android_boot_image_v0_v1_v2_parse_hdr(hdr, &data);
-	else
+	} else {
 		android_boot_image_v3_v4_parse_hdr(hdr, &data);
+	}
 
 	*boot_img_size = data.boot_img_total_size;
 
@@ -485,6 +502,77 @@ bool is_arm64_u_boot_image(const void *buffer, size_t size)
 	    bss_start_offset < 0x60 || bss_start_offset > image_size ||
 	    bss_end_offset < bss_start_offset || bss_end_offset > image_size)
 		return false;
+
+	return true;
+}
+
+bool android_boot_image_has_arm64_u_boot(const void *buffer, size_t size)
+{
+	const struct andr_boot_img_hdr_v0 *hdr = buffer;
+	u32 kernel_offset;
+
+	if (!buffer || size < sizeof(*hdr) || !is_android_boot_image_header(buffer))
+		return false;
+
+	if (hdr->header_version <= 2) {
+		if (!android_boot_image_v0_v1_v2_page_size_valid(hdr))
+			return false;
+
+		kernel_offset = hdr->page_size;
+	} else {
+		kernel_offset = ANDR_GKI_PAGE_SIZE;
+	}
+
+	if (kernel_offset > size || size - kernel_offset < 0x60)
+		return false;
+
+	return is_arm64_u_boot_image((const u8 *)buffer + kernel_offset,
+				     size - kernel_offset);
+}
+
+void towed_boot_android_payload_init(void *header, u32 payload_offset,
+				     u32 payload_size)
+{
+	u8 *data = header;
+
+	memset(header, 0, TOWED_BOOT_ANDROID_PAYLOAD_HEADER_SIZE);
+	memcpy(data, TOWED_BOOT_ANDROID_PAYLOAD_MAGIC,
+	       TOWED_BOOT_ANDROID_PAYLOAD_MAGIC_SIZE);
+	put_unaligned_le32(TOWED_BOOT_ANDROID_PAYLOAD_VERSION,
+			   data + TOWED_BOOT_ANDROID_PAYLOAD_VERSION_OFF);
+	put_unaligned_le32(TOWED_BOOT_ANDROID_PAYLOAD_HEADER_SIZE,
+			   data + TOWED_BOOT_ANDROID_PAYLOAD_HDR_SIZE_OFF);
+	put_unaligned_le32(payload_offset,
+			   data + TOWED_BOOT_ANDROID_PAYLOAD_OFFSET_OFF);
+	put_unaligned_le32(payload_size,
+			   data + TOWED_BOOT_ANDROID_PAYLOAD_SIZE_OFF);
+}
+
+bool towed_boot_android_payload_get(const void *header, u32 *payload_offset,
+				    u32 *payload_size)
+{
+	const u8 *data = header;
+	u32 header_size, version;
+
+	if (!header || !payload_offset || !payload_size)
+		return false;
+
+	if (memcmp(data, TOWED_BOOT_ANDROID_PAYLOAD_MAGIC,
+		   TOWED_BOOT_ANDROID_PAYLOAD_MAGIC_SIZE))
+		return false;
+
+	version = get_unaligned_le32(data +
+				     TOWED_BOOT_ANDROID_PAYLOAD_VERSION_OFF);
+	header_size = get_unaligned_le32(data +
+					 TOWED_BOOT_ANDROID_PAYLOAD_HDR_SIZE_OFF);
+	if (version != TOWED_BOOT_ANDROID_PAYLOAD_VERSION ||
+	    header_size != TOWED_BOOT_ANDROID_PAYLOAD_HEADER_SIZE)
+		return false;
+
+	*payload_offset = get_unaligned_le32(data +
+					     TOWED_BOOT_ANDROID_PAYLOAD_OFFSET_OFF);
+	*payload_size = get_unaligned_le32(data +
+					   TOWED_BOOT_ANDROID_PAYLOAD_SIZE_OFF);
 
 	return true;
 }

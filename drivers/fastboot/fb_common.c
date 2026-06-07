@@ -116,20 +116,7 @@ static bool is_android_vbmeta_image(const void *buffer, u32 download_bytes)
 static bool fastboot_android_boot_has_u_boot(const void *buffer,
 					     u32 download_bytes)
 {
-	const struct andr_boot_img_hdr_v0 *hdr = buffer;
-	u32 kernel_offset;
-
-	if (hdr->header_version <= 2)
-		kernel_offset = hdr->page_size;
-	else
-		kernel_offset = ANDR_GKI_PAGE_SIZE;
-
-	if (kernel_offset > download_bytes ||
-	    download_bytes - kernel_offset < 0x60)
-		return false;
-
-	return is_arm64_u_boot_image((const u8 *)buffer + kernel_offset,
-				     download_bytes - kernel_offset);
+	return android_boot_image_has_arm64_u_boot(buffer, download_bytes);
 }
 
 static void fastboot_print_android_boot(const char *part_name,
