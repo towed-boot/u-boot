@@ -7,11 +7,9 @@ Qualcomm generic boards
 About this
 ----------
 This document describes how to build and run U-Boot for Qualcomm generic
-boards. Right now the generic target supports the Snapdragon 845 SoC, however
-it's expected to support more SoCs going forward.
-
-SDM845 - high-end qualcomm chip, introduced in late 2017.
-Mostly used in flagship phones and tablets of 2018.
+boards. The generic target supports several Snapdragon and Qualcomm Robotics
+SoCs through the common ``qcom_defconfig`` plus optional board-specific config
+fragments.
 
 The current boot flow support loading u-boot as an Android boot image via
 Qualcomm's UEFI-based ABL (Android) Bootloader. The DTB used by U-Boot will
@@ -69,6 +67,20 @@ The DTB is called "sdm845-samsung-starqltechn.dtb"
 
 More information can be found on the `Samsung S9 page`_.
 
+Galaxy S20 FE (r8q)
+^^^^^^^^^^^^^^^^^^^
+
+The r8q is the Samsung Galaxy S20 FE, based on the Qualcomm SM8250 SoC.
+
+This device uses the common qcom_defconfig with the samsung-r8q.config and
+qcom-phone.config fragments for configuration.
+
+Use the following commands::
+
+	make CROSS_COMPILE=aarch64-linux-gnu- O=.output qcom_defconfig samsung-r8q.config qcom-phone.config
+
+The DTB is called "sm8250-samsung-r8q.dtb"
+
 dragonboard845c
 ^^^^^^^^^^^^^^^
 
@@ -110,6 +122,11 @@ Or for db410c (and other boards not supported by the generic target)::
 Or for smartphones::
 
 	make CROSS_COMPILE=aarch64-linux-gnu- O=.output qcom_defconfig qcom-phone.config
+	make CROSS_COMPILE=aarch64-linux-gnu- O=.output -j$(nproc)
+
+For phones with a device-specific fragment, include it before qcom-phone.config::
+
+	make CROSS_COMPILE=aarch64-linux-gnu- O=.output qcom_defconfig samsung-r8q.config qcom-phone.config
 	make CROSS_COMPILE=aarch64-linux-gnu- O=.output -j$(nproc)
 
 - gzip u-boot::
