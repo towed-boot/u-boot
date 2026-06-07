@@ -124,7 +124,12 @@ static int scan_boot_part_name(struct udevice *blk, struct android_priv *priv,
 {
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
 	struct disk_partition partition;
+	const struct andr_boot_img_hdr_v0 *hdr;
+	u32 header_version, kernel_size;
+	ulong kernel_offset, kernel_block;
+	uint kernel_block_offset;
 	ulong num_blks, bufsz;
+	char *kernel_buf;
 	char *buf;
 	int ret;
 
@@ -154,7 +159,45 @@ static int scan_boot_part_name(struct udevice *blk, struct android_priv *priv,
 		return log_msg_ret("get bootimg size", -EINVAL);
 	}
 
-	priv->header_version = ((struct andr_boot_img_hdr_v0 *)buf)->header_version;
+	hdr = (const struct andr_boot_img_hdr_v0 *)buf;
+	header_version = hdr->header_version;
+	kernel_size = header_version <= 2 ? hdr->kernel_size :
+		((const struct andr_boot_img_hdr_v3 *)buf)->kernel_size;
+	kernel_offset = header_version <= 2 ? hdr->page_size :
+		ANDR_GKI_PAGE_SIZE;
+
+	if (IS_ENABLED(CONFIG_TOWED_BOOT_ANDROID) && kernel_size >= 0x60) {
+		kernel_block = kernel_offset / desc->blksz;
+		kernel_block_offset = kernel_offset % desc->blksz;
+		num_blks = DIV_ROUND_UP(kernel_block_offset + 0x60,
+					desc->blksz);
+		bufsz = num_blks * desc->blksz;
+		kernel_buf = malloc(bufsz);
+		if (!kernel_buf) {
+			free(buf);
+			return log_msg_ret("kernel buf", -ENOMEM);
+		}
+
+		ret = blk_read(blk, partition.start + kernel_block, num_blks,
+			       kernel_buf);
+		if (ret != num_blks) {
+			free(kernel_buf);
+			free(buf);
+			return log_msg_ret("kernel read", -EIO);
+		}
+
+		if (is_arm64_u_boot_image(kernel_buf + kernel_block_offset,
+					  bufsz - kernel_block_offset)) {
+			log_debug("%s contains a U-Boot payload\n", partname);
+			free(kernel_buf);
+			free(buf);
+			return log_msg_ret("u-boot payload", -ENOENT);
+		}
+
+		free(kernel_buf);
+	}
+
+	priv->header_version = header_version;
 	strlcpy(priv->boot_part, partname, sizeof(priv->boot_part));
 	priv->boot_part_slotted = android_part_is_slotted(partname,
 							  BOOT_PART_NAME,

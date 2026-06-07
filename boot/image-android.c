@@ -459,6 +459,36 @@ bool is_android_boot_image_header(const void *hdr)
 	return !memcmp(ANDR_BOOT_MAGIC, hdr, ANDR_BOOT_MAGIC_SIZE);
 }
 
+bool is_arm64_u_boot_image(const void *buffer, size_t size)
+{
+	const u8 *data = buffer;
+	u64 image_size, text_base, end_offset;
+	u64 bss_start_offset, bss_end_offset;
+
+	if (!buffer || size < 0x60)
+		return false;
+
+	if (get_unaligned_le32(data + 0x38) != 0x644d5241)
+		return false;
+
+	image_size = get_unaligned_le64(data + 0x10);
+	text_base = get_unaligned_le64(data + 0x40);
+	end_offset = get_unaligned_le64(data + 0x48);
+	bss_start_offset = get_unaligned_le64(data + 0x50);
+	bss_end_offset = get_unaligned_le64(data + 0x58);
+
+	if (image_size < 0x60 || text_base < 0x100000 ||
+	    (text_base & 0xfff))
+		return false;
+
+	if (end_offset < 0x60 || end_offset > image_size ||
+	    bss_start_offset < 0x60 || bss_start_offset > image_size ||
+	    bss_end_offset < bss_start_offset || bss_end_offset > image_size)
+		return false;
+
+	return true;
+}
+
 ulong android_image_get_end(const struct andr_boot_img_hdr_v0 *hdr,
 			    const void *vendor_boot_img)
 {

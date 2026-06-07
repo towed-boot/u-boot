@@ -2019,6 +2019,19 @@ bool android_image_print_dtb_contents(ulong hdr_addr);
 bool is_android_boot_image_header(const void *hdr);
 
 /**
+ * is_arm64_u_boot_image() - Check for an ARM64 U-Boot payload
+ *
+ * ARM64 U-Boot binaries using the Linux Image header keep their link and
+ * section offsets directly after that header. Linux kernels contain code
+ * there instead.
+ *
+ * @buffer: Pointer to image data
+ * @size: Number of available bytes
+ * Return: true if the data has the ARM64 U-Boot header layout
+ */
+bool is_arm64_u_boot_image(const void *buffer, size_t size);
+
+/**
  * is_android_vendor_boot_image_header() - Check the magic of vendor boot image
  *
  * This checks the header of Android vendor boot image and verifies the magic

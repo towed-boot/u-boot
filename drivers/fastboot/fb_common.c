@@ -113,13 +113,39 @@ static bool is_android_vbmeta_image(const void *buffer, u32 download_bytes)
 	return !memcmp(buffer, "AVB0", 4);
 }
 
+static bool fastboot_android_boot_has_u_boot(const void *buffer,
+					     u32 download_bytes)
+{
+	const struct andr_boot_img_hdr_v0 *hdr = buffer;
+	u32 kernel_offset;
+
+	if (hdr->header_version <= 2)
+		kernel_offset = hdr->page_size;
+	else
+		kernel_offset = ANDR_GKI_PAGE_SIZE;
+
+	if (kernel_offset > download_bytes ||
+	    download_bytes - kernel_offset < 0x60)
+		return false;
+
+	return is_arm64_u_boot_image((const u8 *)buffer + kernel_offset,
+				     download_bytes - kernel_offset);
+}
+
 static void fastboot_print_android_boot(const char *part_name,
-					const void *buffer)
+					const void *buffer,
+					u32 download_bytes)
 {
 	const struct andr_boot_img_hdr_v0 *hdr_v0 = buffer;
 	const struct andr_boot_img_hdr_v3 *hdr_v3 = buffer;
 	u32 header_version = hdr_v0->header_version;
 	u32 boot_img_size;
+
+	if (fastboot_android_boot_has_u_boot(buffer, download_bytes)) {
+		printf("Towed-Boot: %s contains a U-Boot payload; Android autoboot will ignore it\n",
+		       part_name);
+		return;
+	}
 
 	printf("Towed-Boot: %s is Android boot image v%u\n",
 	       part_name, header_version);
@@ -170,13 +196,13 @@ void fastboot_towed_boot_flash_probe(const char *part_name, const void *buffer,
 	if (!part_name || !buffer || !download_bytes)
 		return;
 
-	if (is_sparse_image(buffer)) {
+	if (is_sparse_image((void *)buffer)) {
 		printf("Towed-Boot: %s is an Android sparse image\n", part_name);
 		return;
 	}
 
 	if (is_android_boot_image_header(buffer)) {
-		fastboot_print_android_boot(part_name, buffer);
+		fastboot_print_android_boot(part_name, buffer, download_bytes);
 		return;
 	}
 
