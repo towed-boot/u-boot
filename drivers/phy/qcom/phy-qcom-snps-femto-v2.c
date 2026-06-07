@@ -9,8 +9,10 @@
 #include <dm.h>
 #include <dm/device_compat.h>
 #include <dm/devres.h>
+#include <clk.h>
 #include <generic-phy.h>
 #include <malloc.h>
+#include <power/regulator.h>
 #include <reset.h>
 
 #include <asm/io.h>
@@ -57,9 +59,20 @@
 #define REFCLK_SEL_MASK GENMASK(1, 0)
 #define REFCLK_SEL_DEFAULT (0x2 << 0)
 
+#define SNPS_HS_NUM_VREGS 3
+
+static const char *const qcom_snps_hsphy_vreg_names[SNPS_HS_NUM_VREGS] = {
+	"vdda-pll-supply",
+	"vdda33-supply",
+	"vdda18-supply",
+};
+
 struct qcom_snps_hsphy {
 	void __iomem *base;
+	struct clk_bulk clks;
 	struct reset_ctl_bulk resets;
+	struct udevice *vregs[SNPS_HS_NUM_VREGS];
+	int num_vregs;
 };
 
 /*
@@ -137,24 +150,55 @@ static int qcom_snps_hsphy_usb_init(struct phy *phy)
 static int qcom_snps_hsphy_power_on(struct phy *phy)
 {
 	struct qcom_snps_hsphy *priv = dev_get_priv(phy->dev);
-	int ret;
+	int i, ret;
+
+	for (i = 0; i < priv->num_vregs; i++) {
+		ret = regulator_set_enable(priv->vregs[i], true);
+		if (ret)
+			goto disable_vregs;
+	}
+
+	ret = clk_enable_bulk(&priv->clks);
+	if (ret)
+		goto disable_vregs;
+
+	ret = reset_assert_bulk(&priv->resets);
+	if (ret)
+		goto disable_clks;
+
+	udelay(100);
 
 	ret = reset_deassert_bulk(&priv->resets);
 	if (ret)
-		return ret;
+		goto disable_clks;
 
 	ret = qcom_snps_hsphy_usb_init(phy);
 	if (ret)
-		return ret;
+		goto assert_reset;
 
 	return 0;
+
+assert_reset:
+	reset_assert_bulk(&priv->resets);
+disable_clks:
+	clk_disable_bulk(&priv->clks);
+disable_vregs:
+	while (--i >= 0)
+		regulator_set_enable(priv->vregs[i], false);
+
+	return ret;
 }
 
 static int qcom_snps_hsphy_power_off(struct phy *phy)
 {
 	struct qcom_snps_hsphy *priv = dev_get_priv(phy->dev);
+	int i;
 
 	reset_assert_bulk(&priv->resets);
+	clk_disable_bulk(&priv->clks);
+
+	for (i = priv->num_vregs - 1; i >= 0; i--)
+		regulator_set_enable(priv->vregs[i], false);
 
 	return 0;
 }
@@ -162,19 +206,37 @@ static int qcom_snps_hsphy_power_off(struct phy *phy)
 static int qcom_snps_hsphy_phy_probe(struct udevice *dev)
 {
 	struct qcom_snps_hsphy *priv = dev_get_priv(dev);
-	int ret;
+	int i, ret;
 
 	priv->base = dev_read_addr_ptr(dev);
 	if (IS_ERR(priv->base))
 		return PTR_ERR(priv->base);
 
+	ret = clk_get_bulk(dev, &priv->clks);
+	if (ret && ret != -ENOENT && ret != -ENOSYS)
+		return ret;
+
 	ret = reset_get_bulk(dev, &priv->resets);
 	if (ret < 0) {
-		printf("failed to get resets, ret = %d\n", ret);
+		dev_err(dev, "failed to get resets: %d\n", ret);
 		return ret;
 	}
 
-	reset_assert_bulk(&priv->resets);
+	for (i = 0; i < ARRAY_SIZE(qcom_snps_hsphy_vreg_names); i++) {
+		const char *name = qcom_snps_hsphy_vreg_names[i];
+
+		if (!dev_read_prop(dev, name, NULL))
+			continue;
+
+		ret = device_get_supply_regulator(dev, name,
+						  &priv->vregs[priv->num_vregs]);
+		if (ret) {
+			dev_err(dev, "failed to get %s: %d\n", name, ret);
+			return ret;
+		}
+
+		priv->num_vregs++;
+	}
 
 	return 0;
 }
