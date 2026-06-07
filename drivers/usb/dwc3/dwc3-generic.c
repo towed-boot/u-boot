@@ -657,13 +657,24 @@ int dwc3_glue_probe(struct udevice *dev)
 
 	glue->regs = dev_read_addr_size_index(dev, 0, &glue->size);
 
-	ret = dwc3_glue_clk_init(dev, glue);
-	if (ret)
-		return ret;
+	if (device_is_compatible(dev, "qcom,dwc3") ||
+	    device_is_compatible(dev, "qcom,snps-dwc3")) {
+		ret = dwc3_glue_reset_init(dev, glue);
+		if (ret)
+			return ret;
 
-	ret = dwc3_glue_reset_init(dev, glue);
-	if (ret)
-		return ret;
+		ret = dwc3_glue_clk_init(dev, glue);
+		if (ret)
+			return ret;
+	} else {
+		ret = dwc3_glue_clk_init(dev, glue);
+		if (ret)
+			return ret;
+
+		ret = dwc3_glue_reset_init(dev, glue);
+		if (ret)
+			return ret;
+	}
 
 	if (generic_phy_valid(&phy)) {
 		ret = generic_phy_power_on(&phy);
