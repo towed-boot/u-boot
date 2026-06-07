@@ -323,6 +323,8 @@ void fastboot_block_flash_write(const char *part_name, void *download_buffer,
 		fastboot_block_write_sparse_image(dev_desc, &part_info, part_name,
 						  download_buffer, response);
 	} else {
+		fastboot_towed_boot_flash_probe(part_name, download_buffer,
+						download_bytes);
 		fastboot_block_write_raw_image(dev_desc, &part_info, part_name,
 					       download_buffer, download_bytes, response);
 	}

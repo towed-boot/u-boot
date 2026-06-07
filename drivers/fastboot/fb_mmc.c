@@ -470,6 +470,8 @@ void fastboot_mmc_flash_write(const char *cmd, void *download_buffer,
 		fastboot_block_write_sparse_image(dev_desc, &info, cmd,
 						  download_buffer, response);
 	} else {
+		fastboot_towed_boot_flash_probe(cmd, download_buffer,
+						download_bytes);
 		fastboot_block_write_raw_image(dev_desc, &info, cmd, download_buffer,
 					       download_bytes, response);
 	}

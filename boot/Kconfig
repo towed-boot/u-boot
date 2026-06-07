@@ -570,8 +570,20 @@ config BOOTMETH_ANDROID
 	  Enables support for booting Android using bootstd. Android requires
 	  multiple partitions (misc, boot, vbmeta, ...) in storage for booting.
 
-	  Note that only MMC bootdevs are supported at present. This is caused
-	  by AVB being limited to MMC devices only.
+	  Note that AVB is limited to MMC devices at present.
+
+config TOWED_BOOT_ANDROID
+	bool "Towed-Boot Android/downstream boot helper"
+	depends on CMDLINE
+	depends on CMD_BOOTFLOW
+	select BOOTMETH_ANDROID
+	help
+	  Enables Towed-Boot's opt-in Android/downstream boot path. This keeps
+	  the board's normal boot command intact, while allowing phone-oriented
+	  configs to add Android boot attempts and menu entries.
+
+	  Fastboot also prints a short sanity report for flashed boot,
+	  vendor_boot, init_boot, dtbo and related images when enabled.
 
 config BOOTMETH_CROS
 	bool "Bootdev support for Chromium OS"

@@ -94,6 +94,19 @@ void fastboot_fail(const char *reason, char *response);
 void fastboot_okay(const char *reason, char *response);
 
 /**
+ * fastboot_towed_boot_flash_probe() - Print Towed-Boot image info
+ *
+ * @part_name: Name of the partition being flashed
+ * @buffer: Downloaded image buffer
+ * @download_bytes: Size of downloaded image
+ *
+ * This is informational only. It must not alter fastboot responses or flash
+ * policy.
+ */
+void fastboot_towed_boot_flash_probe(const char *part_name, const void *buffer,
+				     u32 download_bytes);
+
+/**
  * fastboot_set_reboot_flag() - Set flag to indicate reboot-bootloader
  *
  * Set flag which indicates that we should reboot into the bootloader

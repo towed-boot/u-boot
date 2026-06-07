@@ -31,6 +31,7 @@
 #define BOOT_PART_NAME "boot"
 #define VENDOR_BOOT_PART_NAME "vendor_boot"
 #define SLOT_LEN 2
+#define SLOT_SUFFIX_LEN 3
 
 /**
  * struct android_priv - Private data
@@ -45,6 +46,10 @@
 struct android_priv {
 	enum android_boot_mode boot_mode;
 	char *slot;
+	char detected_slot[SLOT_LEN];
+	bool boot_part_slotted;
+	char boot_part[PART_NAME_LEN];
+	char vendor_boot_part[PART_NAME_LEN];
 	u32 header_version;
 	u32 boot_img_size;
 	u32 vendor_boot_img_size;
@@ -52,9 +57,8 @@ struct android_priv {
 
 static int android_check(struct udevice *dev, struct bootflow_iter *iter)
 {
-	/* This only works on mmc devices */
-	if (bootflow_iter_check_mmc(iter))
-		return log_msg_ret("mmc", -ENOTSUPP);
+	if (bootflow_iter_check_blk(iter))
+		return log_msg_ret("blk", -EOPNOTSUPP);
 
 	/*
 	 * This only works on whole devices, as multiple
@@ -66,19 +70,63 @@ static int android_check(struct udevice *dev, struct bootflow_iter *iter)
 	return 0;
 }
 
-static int scan_boot_part(struct udevice *blk, struct android_priv *priv)
+static int android_part_name(char *partname, const char *base,
+			     const char *slot)
+{
+	int ret;
+
+	if (slot)
+		ret = snprintf(partname, PART_NAME_LEN, "%s_%s", base, slot);
+	else
+		ret = snprintf(partname, PART_NAME_LEN, "%s", base);
+
+	if (ret < 0 || ret >= PART_NAME_LEN)
+		return -EINVAL;
+
+	return 0;
+}
+
+static const char *android_other_slot(const char *slot)
+{
+	if (!slot)
+		return NULL;
+
+	if (slot[0] == 'a')
+		return "b";
+	if (slot[0] == 'b')
+		return "a";
+
+	return NULL;
+}
+
+static bool android_part_is_slotted(const char *partname, const char *base,
+				    char slot[SLOT_LEN])
+{
+	size_t len = strlen(base);
+
+	if (strlen(partname) != len + SLOT_SUFFIX_LEN)
+		return false;
+
+	if (strncmp(partname, base, len) || partname[len] != '_')
+		return false;
+
+	if (partname[len + 1] != 'a' && partname[len + 1] != 'b')
+		return false;
+
+	slot[0] = partname[len + 1];
+	slot[1] = '\0';
+
+	return true;
+}
+
+static int scan_boot_part_name(struct udevice *blk, struct android_priv *priv,
+			       const char *partname)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
 	struct disk_partition partition;
-	char partname[PART_NAME_LEN];
 	ulong num_blks, bufsz;
 	char *buf;
 	int ret;
-
-	if (priv->slot)
-		sprintf(partname, BOOT_PART_NAME "_%s", priv->slot);
-	else
-		sprintf(partname, BOOT_PART_NAME);
 
 	ret = part_get_info_by_name(desc, partname, &partition);
 	if (ret < 0)
@@ -107,25 +155,70 @@ static int scan_boot_part(struct udevice *blk, struct android_priv *priv)
 	}
 
 	priv->header_version = ((struct andr_boot_img_hdr_v0 *)buf)->header_version;
+	strlcpy(priv->boot_part, partname, sizeof(priv->boot_part));
+	priv->boot_part_slotted = android_part_is_slotted(partname,
+							  BOOT_PART_NAME,
+							  priv->detected_slot);
 
 	free(buf);
 
 	return 0;
 }
 
-static int scan_vendor_boot_part(struct udevice *blk, struct android_priv *priv)
+static int scan_android_part_candidates(struct udevice *blk,
+					struct android_priv *priv,
+					const char *base,
+					int (*scan)(struct udevice *blk,
+						    struct android_priv *priv,
+						    const char *partname))
+{
+	const char *other_slot = android_other_slot(priv->slot);
+	const char *slot_order[3];
+	char partname[PART_NAME_LEN];
+	int i, ret;
+
+	if (priv->slot) {
+		slot_order[0] = priv->slot;
+		slot_order[1] = NULL;
+		slot_order[2] = other_slot;
+	} else if (priv->detected_slot[0]) {
+		slot_order[0] = priv->detected_slot;
+		slot_order[1] = NULL;
+		slot_order[2] = android_other_slot(priv->detected_slot);
+	} else {
+		slot_order[0] = NULL;
+		slot_order[1] = "a";
+		slot_order[2] = "b";
+	}
+
+	for (i = 0; i < ARRAY_SIZE(slot_order); i++) {
+		ret = android_part_name(partname, base, slot_order[i]);
+		if (ret)
+			return ret;
+
+		ret = scan(blk, priv, partname);
+		if (!ret)
+			return 0;
+	}
+
+	return ret;
+}
+
+static int scan_boot_part(struct udevice *blk, struct android_priv *priv)
+{
+	return scan_android_part_candidates(blk, priv, BOOT_PART_NAME,
+					    scan_boot_part_name);
+}
+
+static int scan_vendor_boot_part_name(struct udevice *blk,
+				      struct android_priv *priv,
+				      const char *partname)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(blk);
 	struct disk_partition partition;
-	char partname[PART_NAME_LEN];
 	ulong num_blks, bufsz;
 	char *buf;
 	int ret;
-
-	if (priv->slot)
-		sprintf(partname, VENDOR_BOOT_PART_NAME "_%s", priv->slot);
-	else
-		sprintf(partname, VENDOR_BOOT_PART_NAME);
 
 	ret = part_get_info_by_name(desc, partname, &partition);
 	if (ret < 0)
@@ -153,9 +246,16 @@ static int scan_vendor_boot_part(struct udevice *blk, struct android_priv *priv)
 		return log_msg_ret("get vendor bootimg size", -EINVAL);
 	}
 
+	strlcpy(priv->vendor_boot_part, partname, sizeof(priv->vendor_boot_part));
 	free(buf);
 
 	return 0;
+}
+
+static int scan_vendor_boot_part(struct udevice *blk, struct android_priv *priv)
+{
+	return scan_android_part_candidates(blk, priv, VENDOR_BOOT_PART_NAME,
+					    scan_vendor_boot_part_name);
 }
 
 static int android_read_slot_from_bcb(struct bootflow *bflow, bool decrement)
@@ -163,7 +263,6 @@ static int android_read_slot_from_bcb(struct bootflow *bflow, bool decrement)
 	struct blk_desc *desc = dev_get_uclass_plat(bflow->blk);
 	struct android_priv *priv = bflow->bootmeth_priv;
 	struct disk_partition misc;
-	char slot_suffix[3];
 	int ret;
 
 	if (!CONFIG_IS_ENABLED(ANDROID_AB)) {
@@ -183,13 +282,25 @@ static int android_read_slot_from_bcb(struct bootflow *bflow, bool decrement)
 	priv->slot[0] = BOOT_SLOT_NAME(ret);
 	priv->slot[1] = '\0';
 
-	sprintf(slot_suffix, "_%s", priv->slot);
-	ret = bootflow_cmdline_set_arg(bflow, "androidboot.slot_suffix",
-				       slot_suffix, false);
-	if (ret < 0)
-		return log_msg_ret("cmdl", ret);
-
 	return 0;
+}
+
+static int configure_slot_suffix(struct bootflow *bflow)
+{
+	struct android_priv *priv = bflow->bootmeth_priv;
+	char slot_suffix[SLOT_SUFFIX_LEN];
+	const char *slot = NULL;
+
+	if (priv->boot_part_slotted)
+		slot = priv->detected_slot;
+
+	if (!slot)
+		return 0;
+
+	snprintf(slot_suffix, sizeof(slot_suffix), "_%s", slot);
+
+	return bootflow_cmdline_set_arg(bflow, "androidboot.slot_suffix",
+					slot_suffix, false);
 }
 
 static int configure_serialno(struct bootflow *bflow)
@@ -214,6 +325,7 @@ static int android_read_bootflow(struct udevice *dev, struct bootflow *bflow)
 	struct disk_partition misc;
 	struct android_priv *priv;
 	char command[BCB_FIELD_COMMAND_SZ];
+	const char *bcb_iface;
 	int ret;
 
 	bflow->state = BOOTFLOWST_MEDIA;
@@ -227,7 +339,11 @@ static int android_read_bootflow(struct udevice *dev, struct bootflow *bflow)
 	if (ret < 0)
 		return log_msg_ret("part", ret);
 
-	ret = bcb_find_partition_and_load("mmc", desc->devnum, BCB_PART_NAME);
+	bcb_iface = blk_get_uclass_name(desc->uclass_id);
+	if (!bcb_iface)
+		return log_msg_ret("bcb iface", -EINVAL);
+
+	ret = bcb_find_partition_and_load(bcb_iface, desc->devnum, BCB_PART_NAME);
 	if (ret < 0)
 		return log_msg_ret("bcb load", ret);
 
@@ -235,7 +351,7 @@ static int android_read_bootflow(struct udevice *dev, struct bootflow *bflow)
 	if (ret < 0)
 		return log_msg_ret("bcb read", ret);
 
-	priv = malloc(sizeof(struct android_priv));
+	priv = calloc(1, sizeof(struct android_priv));
 	if (!priv)
 		return log_msg_ret("buf", -ENOMEM);
 
@@ -299,6 +415,12 @@ static int android_read_bootflow(struct udevice *dev, struct bootflow *bflow)
 		}
 	}
 
+	ret = configure_slot_suffix(bflow);
+	if (ret < 0) {
+		log_debug("slot_suffix %d", ret);
+		goto free_priv;
+	}
+
 	/*
 	 * Ignoring return code for the following configurations:
 	 * these are not mandatory for booting.
@@ -331,54 +453,27 @@ static int android_read_file(struct udevice *dev, struct bootflow *bflow,
 {
 	/*
 	 * Reading individual files is not supported since we only
-	 * operate on whole mmc devices (because we require multiple partitions)
+	 * operate on whole block devices (because we require multiple partitions)
 	 */
 	return log_msg_ret("Unsupported", -ENOSYS);
 }
 
 /**
- * read_slotted_partition() - Read a partition by appending a slot suffix
+ * read_partition() - Read a probed Android partition
  *
- * Most modern Android devices use Seamless Updates, where each partition
- * is duplicated. For example, the boot partition has boot_a and boot_b.
- * For more information, see:
- * https://source.android.com/docs/core/ota/ab
- * https://source.android.com/docs/core/ota/ab/ab_implement
- *
- * @blk: Block device to read
- * @name: Partition name to read
- * @slot: Nul-terminated slot suffixed to partition name ("a\0" or "b\0")
+ * @desc: Block device to read
+ * @partname: Exact partition name to read
  * @image_size: Image size in bytes used when reading the partition
  * @addr: Address where the partition content is loaded into
  * Return: 0 if OK, negative errno on failure.
  */
-static int read_slotted_partition(struct blk_desc *desc, const char *const name,
-				  const char slot[2], ulong image_size, ulong addr)
+static int read_partition(struct blk_desc *desc, const char *const partname,
+			  ulong image_size, ulong addr)
 {
 	struct disk_partition partition;
-	char partname[PART_NAME_LEN];
-	size_t partname_len;
 	ulong num_blks = DIV_ROUND_UP(image_size, desc->blksz);
 	int ret;
 	u32 n;
-
-	/*
-	 * Ensure name fits in partname.
-	 * For A/B, it should be <name>_<slot>\0
-	 * For non A/B, it should be <name>\0
-	 */
-	if (CONFIG_IS_ENABLED(ANDROID_AB))
-		partname_len = PART_NAME_LEN - 2 - 1;
-	else
-		partname_len = PART_NAME_LEN - 1;
-
-	if (strlen(name) > partname_len)
-		return log_msg_ret("name too long", -EINVAL);
-
-	if (slot)
-		sprintf(partname, "%s_%s", name, slot);
-	else
-		sprintf(partname, "%s", name);
 
 	ret = part_get_info_by_name(desc, partname, &partition);
 	if (ret < 0)
@@ -434,6 +529,9 @@ static int run_avb_verification(struct bootflow *bflow)
 	char slot_suffix[3] = "";
 	bool unlocked = false;
 	int ret;
+
+	if (desc->uclass_id != UCLASS_MMC)
+		return log_msg_ret("avb non-mmc", -EOPNOTSUPP);
 
 	avb_ops = avb_ops_alloc(desc->devnum);
 	if (!avb_ops)
@@ -562,14 +660,14 @@ static int boot_android_normal(struct bootflow *bflow)
 	if (ret < 0)
 		return log_msg_ret("read slot", ret);
 
-	ret = read_slotted_partition(desc, "boot", priv->slot, priv->boot_img_size,
-				     loadaddr);
+	ret = read_partition(desc, priv->boot_part, priv->boot_img_size,
+			     loadaddr);
 	if (ret < 0)
 		return log_msg_ret("read boot", ret);
 
 	if (priv->header_version >= 3) {
-		ret = read_slotted_partition(desc, "vendor_boot", priv->slot,
-					     priv->vendor_boot_img_size, vloadaddr);
+		ret = read_partition(desc, priv->vendor_boot_part,
+				     priv->vendor_boot_img_size, vloadaddr);
 		if (ret < 0)
 			return log_msg_ret("read vendor_boot", ret);
 		set_avendor_bootimg_addr(vloadaddr);

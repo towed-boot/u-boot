@@ -14,8 +14,13 @@
 #include <command.h>
 #include <env.h>
 #include <fastboot.h>
+#include <image.h>
+#include <image-sparse.h>
 #include <net.h>
 #include <vsprintf.h>
+#include <android_image.h>
+#include <dt_table.h>
+#include <linux/libfdt.h>
 
 /**
  * fastboot_buf_addr - base address of the fastboot download buffer
@@ -77,6 +82,133 @@ void fastboot_okay(const char *reason, char *response)
 		fastboot_response("OKAY", response, "%s", reason);
 	else
 		fastboot_response("OKAY", response, NULL);
+}
+
+static bool is_linux_arm64_image(const void *buffer, u32 download_bytes)
+{
+	static const u8 arm64_magic[] = { 0x41, 0x52, 0x4d, 0x64 };
+
+	if (download_bytes < 0x40)
+		return false;
+
+	return !memcmp((const u8 *)buffer + 0x38, arm64_magic,
+		       sizeof(arm64_magic));
+}
+
+static bool is_android_dt_image(const void *buffer, u32 download_bytes)
+{
+	const struct dt_table_header *hdr = buffer;
+
+	if (download_bytes < sizeof(*hdr))
+		return false;
+
+	return fdt32_to_cpu(hdr->magic) == DT_TABLE_MAGIC;
+}
+
+static bool is_android_vbmeta_image(const void *buffer, u32 download_bytes)
+{
+	if (download_bytes < 4)
+		return false;
+
+	return !memcmp(buffer, "AVB0", 4);
+}
+
+static void fastboot_print_android_boot(const char *part_name,
+					const void *buffer)
+{
+	const struct andr_boot_img_hdr_v0 *hdr_v0 = buffer;
+	const struct andr_boot_img_hdr_v3 *hdr_v3 = buffer;
+	u32 header_version = hdr_v0->header_version;
+	u32 boot_img_size;
+
+	printf("Towed-Boot: %s is Android boot image v%u\n",
+	       part_name, header_version);
+
+	if (header_version <= 2) {
+		printf("Towed-Boot: kernel %u KiB, ramdisk %u KiB, dtb %u KiB\n",
+		       DIV_ROUND_UP(hdr_v0->kernel_size, 1024),
+		       DIV_ROUND_UP(hdr_v0->ramdisk_size, 1024),
+		       DIV_ROUND_UP(hdr_v0->dtb_size, 1024));
+	} else {
+		printf("Towed-Boot: kernel %u KiB, ramdisk %u KiB\n",
+		       DIV_ROUND_UP(hdr_v3->kernel_size, 1024),
+		       DIV_ROUND_UP(hdr_v3->ramdisk_size, 1024));
+		puts("Towed-Boot: vendor_boot is needed for Android boot v3+\n");
+		if (!hdr_v3->kernel_size && hdr_v3->ramdisk_size)
+			puts("Towed-Boot: looks like init_boot style ramdisk data\n");
+	}
+
+	if (android_image_get_bootimg_size(buffer, &boot_img_size))
+		printf("Towed-Boot: parsed boot image size %u KiB\n",
+		       DIV_ROUND_UP(boot_img_size, 1024));
+}
+
+static void fastboot_print_android_vendor_boot(const char *part_name,
+					       const void *buffer)
+{
+	const struct andr_vnd_boot_img_hdr *hdr = buffer;
+	u32 vendor_boot_img_size;
+
+	printf("Towed-Boot: %s is Android vendor_boot image v%u\n",
+	       part_name, hdr->header_version);
+	printf("Towed-Boot: vendor ramdisk %u KiB, dtb %u KiB, bootconfig %u KiB\n",
+	       DIV_ROUND_UP(hdr->vendor_ramdisk_size, 1024),
+	       DIV_ROUND_UP(hdr->dtb_size, 1024),
+	       DIV_ROUND_UP(hdr->bootconfig_size, 1024));
+
+	if (android_image_get_vendor_bootimg_size(buffer, &vendor_boot_img_size))
+		printf("Towed-Boot: parsed vendor_boot image size %u KiB\n",
+		       DIV_ROUND_UP(vendor_boot_img_size, 1024));
+}
+
+void fastboot_towed_boot_flash_probe(const char *part_name, const void *buffer,
+				     u32 download_bytes)
+{
+	if (!IS_ENABLED(CONFIG_TOWED_BOOT_ANDROID))
+		return;
+
+	if (!part_name || !buffer || !download_bytes)
+		return;
+
+	if (is_sparse_image(buffer)) {
+		printf("Towed-Boot: %s is an Android sparse image\n", part_name);
+		return;
+	}
+
+	if (is_android_boot_image_header(buffer)) {
+		fastboot_print_android_boot(part_name, buffer);
+		return;
+	}
+
+	if (is_android_vendor_boot_image_header(buffer)) {
+		fastboot_print_android_vendor_boot(part_name, buffer);
+		return;
+	}
+
+	if (is_android_dt_image(buffer, download_bytes)) {
+		printf("Towed-Boot: %s is Android DTB/DTBO table data\n",
+		       part_name);
+		return;
+	}
+
+	if (is_android_vbmeta_image(buffer, download_bytes)) {
+		printf("Towed-Boot: %s is Android vbmeta data\n", part_name);
+		return;
+	}
+
+	switch (genimg_get_format(buffer)) {
+	case IMAGE_FORMAT_FIT:
+		printf("Towed-Boot: %s is a FIT image\n", part_name);
+		return;
+	case IMAGE_FORMAT_LEGACY:
+		printf("Towed-Boot: %s is a legacy uImage\n", part_name);
+		return;
+	default:
+		break;
+	}
+
+	if (is_linux_arm64_image(buffer, download_bytes))
+		printf("Towed-Boot: %s is a Linux ARM64 Image\n", part_name);
 }
 
 /**
