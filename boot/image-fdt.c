@@ -20,6 +20,7 @@
 #include <malloc.h>
 #include <asm/global_data.h>
 #include <linux/libfdt.h>
+#include <linux/compiler.h>
 #include <mapmem.h>
 #include <asm/io.h>
 #include <dm/ofnode.h>
@@ -32,6 +33,13 @@ static void fdt_error(const char *msg)
 	puts("ERROR: ");
 	puts(msg);
 	puts(" - must RESET the board to recover.\n");
+}
+
+__weak int towed_boot_android_apply_dtbo_overlay(void *fdt_blob)
+{
+	(void)fdt_blob;
+
+	return 0;
 }
 
 #if CONFIG_IS_ENABLED(LEGACY_IMAGE_FORMAT)
@@ -517,7 +525,21 @@ int boot_get_fdt(void *buf, const char *select, uint arch,
 	} else if (genimg_get_format(buf) == IMAGE_FORMAT_ANDROID) {
 		void *hdr = buf;
 		ulong		fdt_data, fdt_len;
+		ulong		staged_fdt_addr;
 		u32			fdt_size, dtb_idx;
+
+		staged_fdt_addr = env_get_hex("towed_android_fdt_addr", 0);
+		if (staged_fdt_addr) {
+			fdt_blob = map_sysmem(staged_fdt_addr, 0);
+			if (fdt_check_header(fdt_blob))
+				goto no_fdt;
+
+			debug("## Using staged Android FDT at 0x%lx\n",
+			      staged_fdt_addr);
+			towed_boot_android_apply_dtbo_overlay(fdt_blob);
+			goto android_fdt_done;
+		}
+
 		/*
 		 * Firstly check if this android boot image has dtb field.
 		 */
@@ -529,6 +551,7 @@ int boot_get_fdt(void *buf, const char *select, uint arch,
 				goto no_fdt;
 
 			debug("## Using FDT in Android image dtb area with idx %u\n", dtb_idx);
+			towed_boot_android_apply_dtbo_overlay(fdt_blob);
 		} else if (!android_image_get_second(hdr, &fdt_data, &fdt_len) &&
 			!fdt_check_header((char *)fdt_data)) {
 			fdt_blob = (char *)fdt_data;
@@ -536,6 +559,7 @@ int boot_get_fdt(void *buf, const char *select, uint arch,
 				goto error;
 
 			debug("## Using FDT in Android image second area\n");
+			towed_boot_android_apply_dtbo_overlay(fdt_blob);
 		} else {
 			fdt_addr = env_get_hex("fdtaddr", 0);
 			if (!fdt_addr)
@@ -546,7 +570,10 @@ int boot_get_fdt(void *buf, const char *select, uint arch,
 				goto no_fdt;
 
 			debug("## Using FDT at ${fdtaddr}=Ox%lx\n", fdt_addr);
+			towed_boot_android_apply_dtbo_overlay(fdt_blob);
 		}
+
+android_fdt_done:
 #endif
 	} else {
 		debug("## No Flattened Device Tree\n");

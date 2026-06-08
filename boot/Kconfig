@@ -577,6 +577,7 @@ config TOWED_BOOT_ANDROID
 	depends on CMDLINE
 	depends on CMD_BOOTFLOW
 	select BOOTMETH_ANDROID
+	select OF_LIBFDT_OVERLAY if OF_LIBFDT
 	help
 	  Enables Towed-Boot's opt-in Android/downstream boot path. This keeps
 	  the board's normal boot command intact, while allowing phone-oriented
@@ -584,6 +585,38 @@ config TOWED_BOOT_ANDROID
 
 	  Fastboot also prints a short sanity report for flashed boot,
 	  vendor_boot, init_boot, dtbo and related images when enabled.
+
+config TOWED_BOOT_ANDROID_DTBO_INDEX
+	int "Default Android DTBO table index"
+	depends on TOWED_BOOT_ANDROID
+	default 0
+	help
+	  Default DTBO table index used when the adtbo_idx environment variable
+	  is not set. Boards can override this when index 0 is just a stub.
+
+config TOWED_DEBUG
+	bool "Towed-Boot Android kernel debug logging"
+	depends on TOWED_BOOT_ANDROID
+	help
+	  Enables noisy Android/downstream kernel logging during boot. Towed-Boot
+	  cannot keep running after it jumps to Linux, so this works by rewriting
+	  the Android kernel command line before handoff.
+
+config TOWED_DEBUG_ANDROID_CONSOLE
+	string "Android debug console"
+	depends on TOWED_DEBUG
+	default "tty0"
+	help
+	  Console passed to the Android kernel when Towed-Boot debug logging is
+	  enabled. Boards with a known serial console can override this.
+
+config TOWED_DEBUG_ANDROID_BOOTARGS
+	string "Android debug kernel arguments"
+	depends on TOWED_DEBUG
+	default "debug ignore_loglevel loglevel=8 initcall_debug no_console_suspend printk.devkmsg=on"
+	help
+	  Extra kernel arguments passed to Android/downstream kernels when
+	  Towed-Boot debug logging is enabled.
 
 config BOOTMETH_CROS
 	bool "Bootdev support for Chromium OS"

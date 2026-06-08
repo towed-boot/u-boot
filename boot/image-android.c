@@ -3,6 +3,7 @@
  * Copyright (c) 2011 Sebastian Andrzej Siewior <bigeasy@linutronix.de>
  */
 
+#include <bootflow.h>
 #include <env.h>
 #include <image.h>
 #include <image-android-dt.h>
@@ -22,8 +23,122 @@
 #define TOWED_BOOT_ANDROID_PAYLOAD_HDR_SIZE_OFF	20
 #define TOWED_BOOT_ANDROID_PAYLOAD_OFFSET_OFF	24
 #define TOWED_BOOT_ANDROID_PAYLOAD_SIZE_OFF	28
-
 static char andr_tmp_str[ANDR_BOOT_ARGS_SIZE + 1];
+
+static int towed_debug_set_bootarg(char **cmdline, const char *arg,
+				   const char *value)
+{
+	char *buf, *new_cmdline;
+	size_t len;
+	int ret;
+
+	len = strlen(*cmdline ?: "") + strlen(arg) + 2;
+	if (value && value != BOOTFLOWCL_EMPTY)
+		len += strlen(value) + 2;
+
+	buf = malloc(len);
+	if (!buf)
+		return -ENOMEM;
+
+	ret = cmdline_set_arg(buf, len, *cmdline, arg, value, NULL);
+	if (ret < 0) {
+		if (!value && ret == -ENOENT) {
+			free(buf);
+			return 0;
+		}
+
+		free(buf);
+		return ret;
+	}
+
+	new_cmdline = strdup(buf);
+	free(buf);
+	if (!new_cmdline)
+		return -ENOMEM;
+
+	free(*cmdline);
+	*cmdline = new_cmdline;
+
+	return 0;
+}
+
+static int towed_debug_apply_bootarg(char **cmdline, char *arg)
+{
+	char *value;
+
+	if (!arg || !*arg)
+		return 0;
+
+	value = strchr(arg, '=');
+	if (value) {
+		*value++ = '\0';
+		return towed_debug_set_bootarg(cmdline, arg, value);
+	}
+
+	return towed_debug_set_bootarg(cmdline, arg, BOOTFLOWCL_EMPTY);
+}
+
+static int towed_debug_apply_bootargs(char **cmdline, const char *extra_args)
+{
+	char *args, *arg, *orig;
+	int ret;
+
+	if (!extra_args || !*extra_args)
+		return 0;
+
+	args = strdup(extra_args);
+	if (!args)
+		return -ENOMEM;
+	orig = args;
+
+	arg = strsep(&args, " ");
+	while (arg) {
+		ret = towed_debug_apply_bootarg(cmdline, arg);
+		if (ret < 0) {
+			free(orig);
+			return ret;
+		}
+
+		arg = strsep(&args, " ");
+	}
+
+	free(orig);
+
+	return 0;
+}
+
+static int towed_debug_update_android_bootargs(char **cmdline)
+{
+	const char *console, *extra_args;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_TOWED_DEBUG))
+		return 0;
+
+	console = env_get("towed_debug_console");
+	if (!console || !*console)
+		console = CONFIG_IS_ENABLED(TOWED_DEBUG,
+					    (CONFIG_TOWED_DEBUG_ANDROID_CONSOLE),
+					    (""));
+
+	if (console && *console) {
+		ret = towed_debug_set_bootarg(cmdline, "console", console);
+		if (ret < 0)
+			return ret;
+	}
+
+	ret = towed_debug_set_bootarg(cmdline, "quiet", NULL);
+	if (ret < 0)
+		return ret;
+
+	extra_args = env_get("towed_debug_bootargs");
+	if (!extra_args || !*extra_args)
+		extra_args = CONFIG_IS_ENABLED(TOWED_DEBUG,
+					       (CONFIG_TOWED_DEBUG_ANDROID_BOOTARGS),
+					       (""));
+
+	return towed_debug_apply_bootargs(cmdline, extra_args);
+}
 
 static bool android_boot_image_v0_v1_v2_page_size_valid(const struct andr_boot_img_hdr_v0 *hdr)
 {
@@ -334,6 +449,12 @@ bool android_image_get_data(const void *boot_hdr, const void *vendor_boot_hdr,
 static ulong android_image_get_kernel_addr(struct andr_image_data *img_data,
 					   ulong comp)
 {
+	ulong staged_addr;
+
+	staged_addr = env_get_hex("towed_android_kernel_addr", 0);
+	if (staged_addr)
+		return staged_addr;
+
 	/*
 	 * All the Android tools that generate a boot.img use this
 	 * address as the default.
@@ -387,6 +508,7 @@ int android_image_get_kernel(const void *hdr,
 	ulong kernel_addr;
 	const struct legacy_img_hdr *ihdr;
 	ulong comp;
+	int ret;
 
 	if (!android_image_get_data(hdr, vendor_boot_img, &img_data))
 		return -EINVAL;
@@ -445,6 +567,12 @@ int android_image_get_kernel(const void *hdr,
 		if (*newbootargs) /* If there is something in newbootargs, a space is needed */
 			strcat(newbootargs, " ");
 		strcat(newbootargs, img_data.kcmdline_extra);
+	}
+
+	ret = towed_debug_update_android_bootargs(&newbootargs);
+	if (ret < 0) {
+		free(newbootargs);
+		return ret;
 	}
 
 	env_set("bootargs", newbootargs);
@@ -787,6 +915,7 @@ int android_image_get_ramdisk(const void *hdr, const void *vendor_boot_img,
 			      ulong *rd_data, ulong *rd_len)
 {
 	struct andr_image_data img_data = {0};
+	ulong staged_addr;
 	ulong ramdisk_ptr;
 
 	if (!android_image_get_data(hdr, vendor_boot_img, &img_data))
@@ -794,6 +923,16 @@ int android_image_get_ramdisk(const void *hdr, const void *vendor_boot_img,
 
 	if (!img_data.ramdisk_size)
 		return -ENOENT;
+
+	staged_addr = env_get_hex("towed_android_ramdisk_addr", 0);
+	if (staged_addr) {
+		*rd_data = staged_addr;
+		*rd_len = img_data.ramdisk_size;
+		printf("RAM disk staged addr 0x%08lx size %u KiB\n",
+		       *rd_data, DIV_ROUND_UP(img_data.ramdisk_size, 1024));
+		return 0;
+	}
+
 	/*
 	 * Android tools can generate a boot.img with default load address
 	 * or 0, even though it doesn't really make a lot of sense, and it

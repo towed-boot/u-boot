@@ -19,20 +19,28 @@
 #include <bootmeth.h>
 #include <dm.h>
 #include <div64.h>
+#include <dt_table.h>
 #include <env.h>
 #include <image.h>
 #include <malloc.h>
 #include <mapmem.h>
 #include <part.h>
 #include <version.h>
+#include <linux/libfdt.h>
 #include "bootmeth_android.h"
 
 #define BCB_FIELD_COMMAND_SZ 32
 #define BCB_PART_NAME "misc"
 #define BOOT_PART_NAME "boot"
+#define DTBO_PART_NAME "dtbo"
 #define VENDOR_BOOT_PART_NAME "vendor_boot"
 #define SLOT_LEN 2
 #define SLOT_SUFFIX_LEN 3
+#define TOWED_ANDROID_DTBO_ADDR_ENV "towed_android_dtbo_addr"
+#define TOWED_ANDROID_DTBO_SIZE_ENV "towed_android_dtbo_size"
+#define TOWED_ANDROID_FDT_ADDR_ENV "towed_android_fdt_addr"
+#define TOWED_ANDROID_KERNEL_ADDR_ENV "towed_android_kernel_addr"
+#define TOWED_ANDROID_RAMDISK_ADDR_ENV "towed_android_ramdisk_addr"
 
 /**
  * struct android_priv - Private data
@@ -50,10 +58,12 @@ struct android_priv {
 	char detected_slot[SLOT_LEN];
 	bool boot_part_slotted;
 	char boot_part[PART_NAME_LEN];
+	char dtbo_part[PART_NAME_LEN];
 	char vendor_boot_part[PART_NAME_LEN];
 	u32 header_version;
 	u32 boot_img_offset;
 	u32 boot_img_size;
+	u32 dtbo_img_size;
 	u32 vendor_boot_img_size;
 };
 
@@ -397,10 +407,81 @@ static int scan_vendor_boot_part_name(struct udevice *blk,
 	return 0;
 }
 
+static bool android_dt_image_get_size(const void *buf, u32 *image_size)
+{
+	const struct dt_table_header *hdr = buf;
+	u32 total_size, header_size, entry_size, entry_count, entries_offset;
+	u64 entries_end;
+
+	if (fdt32_to_cpu(hdr->magic) != DT_TABLE_MAGIC)
+		return false;
+
+	total_size = fdt32_to_cpu(hdr->total_size);
+	header_size = fdt32_to_cpu(hdr->header_size);
+	entry_size = fdt32_to_cpu(hdr->dt_entry_size);
+	entry_count = fdt32_to_cpu(hdr->dt_entry_count);
+	entries_offset = fdt32_to_cpu(hdr->dt_entries_offset);
+
+	entries_end = (u64)entries_offset + (u64)entry_size * entry_count;
+	if (header_size < sizeof(*hdr) ||
+	    entry_size < sizeof(struct dt_table_entry) ||
+	    entries_offset < header_size || entries_end > total_size)
+		return false;
+
+	*image_size = total_size;
+
+	return true;
+}
+
+static int scan_dtbo_part_name(struct udevice *blk, struct android_priv *priv,
+			       const char *partname)
+{
+	struct blk_desc *desc = dev_get_uclass_plat(blk);
+	struct disk_partition partition;
+	u32 image_size;
+	ulong num_blks, bufsz;
+	char *buf;
+	int ret;
+
+	ret = part_get_info_by_name(desc, partname, &partition);
+	if (ret < 0)
+		return log_msg_ret("part info", ret);
+
+	num_blks = DIV_ROUND_UP(sizeof(struct dt_table_header), desc->blksz);
+	bufsz = num_blks * desc->blksz;
+	buf = malloc(bufsz);
+	if (!buf)
+		return log_msg_ret("buf", -ENOMEM);
+
+	ret = blk_read(blk, partition.start, num_blks, buf);
+	if (ret != num_blks) {
+		free(buf);
+		return log_msg_ret("part read", -EIO);
+	}
+
+	if (!android_dt_image_get_size(buf, &image_size) ||
+	    image_size > (u64)partition.size * desc->blksz) {
+		free(buf);
+		return log_msg_ret("dtbo image", -EINVAL);
+	}
+
+	strlcpy(priv->dtbo_part, partname, sizeof(priv->dtbo_part));
+	priv->dtbo_img_size = image_size;
+	free(buf);
+
+	return 0;
+}
+
 static int scan_vendor_boot_part(struct udevice *blk, struct android_priv *priv)
 {
 	return scan_android_part_candidates(blk, priv, VENDOR_BOOT_PART_NAME,
 					    scan_vendor_boot_part_name);
+}
+
+static int scan_dtbo_part(struct udevice *blk, struct android_priv *priv)
+{
+	return scan_android_part_candidates(blk, priv, DTBO_PART_NAME,
+					    scan_dtbo_part_name);
 }
 
 static int android_read_slot_from_bcb(struct bootflow *bflow, bool decrement)
@@ -552,6 +633,10 @@ static int android_read_bootflow(struct udevice *dev, struct bootflow *bflow)
 		goto free_priv;
 	}
 
+	ret = scan_dtbo_part(bflow->blk, priv);
+	if (ret < 0)
+		log_debug("scan dtbo skipped: err=%d\n", ret);
+
 	if (priv->header_version >= 3) {
 		ret = scan_vendor_boot_part(bflow->blk, priv);
 		if (ret < 0) {
@@ -633,6 +718,110 @@ static int read_partition(struct blk_desc *desc, const char *const partname,
 		return log_msg_ret("part read", -EIO);
 
 	return 0;
+}
+
+static void clear_dtbo_env(void)
+{
+	env_set(TOWED_ANDROID_DTBO_ADDR_ENV, NULL);
+	env_set(TOWED_ANDROID_DTBO_SIZE_ENV, NULL);
+}
+
+static void clear_staged_component_env(void)
+{
+	env_set(TOWED_ANDROID_KERNEL_ADDR_ENV, NULL);
+	env_set(TOWED_ANDROID_RAMDISK_ADDR_ENV, NULL);
+	env_set(TOWED_ANDROID_FDT_ADDR_ENV, NULL);
+}
+
+static int stage_android_components(ulong boot_addr, ulong vendor_boot_addr)
+{
+	const void *vendor_boot = NULL;
+	struct andr_image_data data = {0};
+	ulong kernel_addr, ramdisk_addr, fdt_addr, dtb_src;
+	u32 dtb_index, dtb_size;
+
+	clear_staged_component_env();
+
+	if (vendor_boot_addr)
+		vendor_boot = (const void *)vendor_boot_addr;
+
+	if (!android_image_get_data((const void *)boot_addr, vendor_boot, &data))
+		return -EINVAL;
+
+	kernel_addr = env_get_hex("android_kernel_addr_r", 0);
+	if (kernel_addr)
+		env_set_hex(TOWED_ANDROID_KERNEL_ADDR_ENV, kernel_addr);
+
+	/*
+	 * The arm64 Image relocation can overlap the v0-v2 ramdisk and DTB
+	 * stored after it. Get them the fuck out of the way before bootm moves
+	 * the kernel.
+	 */
+	if (data.header_version <= 2 && data.ramdisk_size) {
+		ramdisk_addr = env_get_hex("android_ramdisk_addr_r", 0);
+		if (!ramdisk_addr)
+			return -EINVAL;
+
+		memmove((void *)ramdisk_addr, (const void *)data.ramdisk_ptr,
+			data.ramdisk_size);
+		env_set_hex(TOWED_ANDROID_RAMDISK_ADDR_ENV, ramdisk_addr);
+	}
+
+	fdt_addr = env_get_hex("android_fdt_addr_r", 0);
+	dtb_index = env_get_ulong("adtb_idx", 10, 0);
+	if (fdt_addr) {
+		if (!android_image_get_dtb_by_index(boot_addr,
+						    vendor_boot_addr ?
+						    vendor_boot_addr : -1,
+						    dtb_index, &dtb_src,
+						    &dtb_size))
+			return -EINVAL;
+
+		memmove((void *)fdt_addr, (const void *)dtb_src, dtb_size);
+		env_set_hex(TOWED_ANDROID_FDT_ADDR_ENV, fdt_addr);
+	}
+
+	printf("Towed-Boot: staged kernel at 0x%lx", kernel_addr);
+	if (env_get_hex(TOWED_ANDROID_RAMDISK_ADDR_ENV, 0))
+		printf(", ramdisk at 0x%lx",
+		       env_get_hex(TOWED_ANDROID_RAMDISK_ADDR_ENV, 0));
+	if (env_get_hex(TOWED_ANDROID_FDT_ADDR_ENV, 0))
+		printf(", DTB at 0x%lx", fdt_addr);
+	puts("\n");
+
+	return 0;
+}
+
+static void load_dtbo_partition(struct bootflow *bflow)
+{
+	struct blk_desc *desc = dev_get_uclass_plat(bflow->blk);
+	struct android_priv *priv = bflow->bootmeth_priv;
+	ulong dtboaddr = env_get_hex("dtbo_addr_r", 0);
+	int ret;
+
+	clear_dtbo_env();
+
+	if (!priv->dtbo_img_size)
+		return;
+
+	if (!dtboaddr) {
+		puts("Towed-Boot: dtbo_addr_r is unset, skipping DTBO\n");
+		return;
+	}
+
+	ret = read_partition(desc, priv->dtbo_part, 0, priv->dtbo_img_size,
+			     dtboaddr);
+	if (ret < 0) {
+		printf("Towed-Boot: failed to read %s DTBO table (%d)\n",
+		       priv->dtbo_part, ret);
+		return;
+	}
+
+	env_set_hex(TOWED_ANDROID_DTBO_ADDR_ENV, dtboaddr);
+	env_set_hex(TOWED_ANDROID_DTBO_SIZE_ENV, priv->dtbo_img_size);
+	printf("Towed-Boot: loaded %s DTBO table at 0x%lx (%u KiB)\n",
+	       priv->dtbo_part, dtboaddr,
+	       DIV_ROUND_UP(priv->dtbo_img_size, 1024));
 }
 
 #if CONFIG_IS_ENABLED(AVB_VERIFY)
@@ -792,12 +981,98 @@ static int append_bootargs_to_cmdline(struct bootflow *bflow)
 	return 0;
 }
 
+static int towed_debug_cmdline_set_arg(struct bootflow *bflow, char *arg)
+{
+	char *value;
+
+	if (!arg || !*arg)
+		return 0;
+
+	value = strchr(arg, '=');
+	if (value) {
+		*value++ = '\0';
+		return bootflow_cmdline_set_arg(bflow, arg, value, false);
+	}
+
+	return bootflow_cmdline_set_arg(bflow, arg, BOOTFLOWCL_EMPTY, false);
+}
+
+static int towed_debug_cmdline_apply_extra(struct bootflow *bflow,
+					   const char *extra_args)
+{
+	char *args, *arg, *orig;
+	int ret;
+
+	if (!extra_args || !*extra_args)
+		return 0;
+
+	args = strdup(extra_args);
+	if (!args)
+		return -ENOMEM;
+	orig = args;
+
+	arg = strsep(&args, " ");
+	while (arg) {
+		ret = towed_debug_cmdline_set_arg(bflow, arg);
+		if (ret < 0) {
+			free(orig);
+			return ret;
+		}
+
+		arg = strsep(&args, " ");
+	}
+
+	free(orig);
+
+	return 0;
+}
+
+static int apply_towed_debug_cmdline(struct bootflow *bflow)
+{
+	const char *console, *extra_args;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_TOWED_DEBUG))
+		return 0;
+
+	console = env_get("towed_debug_console");
+	if (!console || !*console)
+		console = CONFIG_IS_ENABLED(TOWED_DEBUG,
+					    (CONFIG_TOWED_DEBUG_ANDROID_CONSOLE),
+					    (""));
+
+	if (console && *console) {
+		ret = bootflow_cmdline_set_arg(bflow, "console", console, false);
+		if (ret < 0)
+			return ret;
+	}
+
+	ret = bootflow_cmdline_set_arg(bflow, "quiet", NULL, false);
+	if (ret < 0 && ret != -ENOENT)
+		return ret;
+
+	extra_args = env_get("towed_debug_bootargs");
+	if (!extra_args || !*extra_args)
+		extra_args = CONFIG_IS_ENABLED(TOWED_DEBUG,
+					       (CONFIG_TOWED_DEBUG_ANDROID_BOOTARGS),
+					       (""));
+
+	ret = towed_debug_cmdline_apply_extra(bflow, extra_args);
+	if (ret < 0)
+		return ret;
+
+	printf("Towed-Boot: Android kernel debug logging enabled\n");
+
+	return 0;
+}
+
 static int boot_android_normal(struct bootflow *bflow)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(bflow->blk);
 	struct android_priv *priv = bflow->bootmeth_priv;
 	int ret;
-	ulong loadaddr = env_get_hex("loadaddr", 0);
+	ulong loadaddr = env_get_hex("android_boot_addr_r",
+				     env_get_hex("loadaddr", 0));
 	ulong vloadaddr = env_get_hex("vendor_boot_comp_addr_r", 0);
 
 	ret = run_avb_verification(bflow);
@@ -822,6 +1097,12 @@ static int boot_android_normal(struct bootflow *bflow)
 		set_avendor_bootimg_addr(vloadaddr);
 	}
 	set_abootimg_addr(loadaddr);
+	load_dtbo_partition(bflow);
+
+	ret = stage_android_components(loadaddr,
+				       priv->header_version >= 3 ? vloadaddr : 0);
+	if (ret < 0)
+		return log_msg_ret("stage Android components", ret);
 
 	if (priv->slot)
 		free(priv->slot);
@@ -830,7 +1111,12 @@ static int boot_android_normal(struct bootflow *bflow)
 	if (ret < 0)
 		return log_msg_ret("bootargs append", ret);
 
+	ret = apply_towed_debug_cmdline(bflow);
+	if (ret < 0)
+		return log_msg_ret("towed debug cmdline", ret);
+
 	ret = bootm_boot_start(loadaddr, bflow->cmdline);
+	clear_staged_component_env();
 
 	return log_msg_ret("boot", ret);
 }
