@@ -997,6 +997,37 @@ static int towed_debug_cmdline_set_arg(struct bootflow *bflow, char *arg)
 	return bootflow_cmdline_set_arg(bflow, arg, BOOTFLOWCL_EMPTY, false);
 }
 
+static int towed_debug_cmdline_append_raw(struct bootflow *bflow,
+					  const char *arg)
+{
+	const char *old_cmdline = bflow->cmdline ?: "";
+	char *new_cmdline;
+	size_t old_len, arg_len;
+
+	if (!arg || !*arg)
+		return 0;
+
+	old_len = strlen(old_cmdline);
+	arg_len = strlen(arg);
+
+	new_cmdline = malloc(old_len + !!old_len + arg_len + 1);
+	if (!new_cmdline)
+		return -ENOMEM;
+
+	if (old_len) {
+		strcpy(new_cmdline, old_cmdline);
+		strcat(new_cmdline, " ");
+		strcat(new_cmdline, arg);
+	} else {
+		strcpy(new_cmdline, arg);
+	}
+
+	free(bflow->cmdline);
+	bflow->cmdline = new_cmdline;
+
+	return 0;
+}
+
 static int towed_debug_cmdline_apply_extra(struct bootflow *bflow,
 					   const char *extra_args)
 {
@@ -1027,25 +1058,81 @@ static int towed_debug_cmdline_apply_extra(struct bootflow *bflow,
 	return 0;
 }
 
+static int towed_debug_cmdline_apply_consoles(struct bootflow *bflow,
+					      const char *consoles)
+{
+	char *args, *console, *orig;
+	int ret;
+
+	if (!consoles || !*consoles)
+		return 0;
+
+	ret = bootflow_cmdline_set_arg(bflow, "console", NULL, false);
+	if (ret < 0 && ret != -ENOENT)
+		return ret;
+
+	args = strdup(consoles);
+	if (!args)
+		return -ENOMEM;
+	orig = args;
+
+	console = strsep(&args, " ");
+	while (console) {
+		if (*console) {
+			if (!strncmp(console, "console=", 8)) {
+				ret = towed_debug_cmdline_append_raw(bflow,
+								     console);
+			} else {
+				char *console_arg;
+
+				console_arg = malloc(strlen(console) + 9);
+				if (!console_arg) {
+					free(orig);
+					return -ENOMEM;
+				}
+
+				sprintf(console_arg, "console=%s", console);
+				ret = towed_debug_cmdline_append_raw(bflow,
+								     console_arg);
+				free(console_arg);
+			}
+			if (ret < 0) {
+				free(orig);
+				return ret;
+			}
+		}
+
+		console = strsep(&args, " ");
+	}
+
+	free(orig);
+
+	return 0;
+}
+
 static int apply_towed_debug_cmdline(struct bootflow *bflow)
 {
-	const char *console, *extra_args;
+	const char *consoles, *extra_args;
 	int ret;
 
 	if (!IS_ENABLED(CONFIG_TOWED_DEBUG))
 		return 0;
 
-	console = env_get("towed_debug_console");
-	if (!console || !*console)
-		console = CONFIG_IS_ENABLED(TOWED_DEBUG,
-					    (CONFIG_TOWED_DEBUG_ANDROID_CONSOLE),
-					    (""));
+	consoles = env_get("towed_debug_consoles");
+	if (!consoles || !*consoles)
+		consoles = env_get("towed_debug_console");
+	if (!consoles || !*consoles)
+		consoles = CONFIG_IS_ENABLED(TOWED_DEBUG,
+					     (CONFIG_TOWED_DEBUG_ANDROID_CONSOLES),
+					     (""));
+	if (!consoles || !*consoles)
+		consoles = CONFIG_IS_ENABLED(TOWED_DEBUG,
+					     (CONFIG_TOWED_DEBUG_ANDROID_CONSOLE),
+					     (""));
 
-	if (console && *console) {
-		ret = bootflow_cmdline_set_arg(bflow, "console", console, false);
-		if (ret < 0)
-			return ret;
-	}
+	ret = towed_debug_cmdline_apply_consoles(bflow, consoles);
+	if (ret < 0)
+		return ret;
 
 	ret = bootflow_cmdline_set_arg(bflow, "quiet", NULL, false);
 	if (ret < 0 && ret != -ENOENT)

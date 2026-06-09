@@ -610,6 +610,16 @@ config TOWED_DEBUG_ANDROID_CONSOLE
 	  Console passed to the Android kernel when Towed-Boot debug logging is
 	  enabled. Boards with a known serial console can override this.
 
+config TOWED_DEBUG_ANDROID_CONSOLES
+	string "Android debug consoles"
+	depends on TOWED_DEBUG
+	default "tty0"
+	help
+	  Space-separated Linux console values passed to Android/downstream
+	  kernels when Towed-Boot debug logging is enabled. This intentionally
+	  supports multiple console= arguments, unlike normal cmdline key
+	  replacement.
+
 config TOWED_DEBUG_ANDROID_BOOTARGS
 	string "Android debug kernel arguments"
 	depends on TOWED_DEBUG
@@ -617,6 +627,44 @@ config TOWED_DEBUG_ANDROID_BOOTARGS
 	help
 	  Extra kernel arguments passed to Android/downstream kernels when
 	  Towed-Boot debug logging is enabled.
+
+config TOWED_DEBUG_SIMPLEFB
+	bool "Add a simple framebuffer for Android debug logging"
+	depends on TOWED_DEBUG
+	help
+	  Adds a /chosen/simple-framebuffer node before booting Android so
+	  console=tty0 has a usable early-ish display target when the kernel has
+	  simplefb/fbcon support.
+
+config TOWED_DEBUG_SIMPLEFB_ADDR
+	hex "Android debug simple framebuffer address"
+	depends on TOWED_DEBUG_SIMPLEFB
+	default 0x0
+
+config TOWED_DEBUG_SIMPLEFB_SIZE
+	hex "Android debug simple framebuffer size"
+	depends on TOWED_DEBUG_SIMPLEFB
+	default 0x0
+
+config TOWED_DEBUG_SIMPLEFB_WIDTH
+	int "Android debug simple framebuffer width"
+	depends on TOWED_DEBUG_SIMPLEFB
+	default 0
+
+config TOWED_DEBUG_SIMPLEFB_HEIGHT
+	int "Android debug simple framebuffer height"
+	depends on TOWED_DEBUG_SIMPLEFB
+	default 0
+
+config TOWED_DEBUG_SIMPLEFB_STRIDE
+	int "Android debug simple framebuffer stride"
+	depends on TOWED_DEBUG_SIMPLEFB
+	default 0
+
+config TOWED_DEBUG_SIMPLEFB_FORMAT
+	string "Android debug simple framebuffer format"
+	depends on TOWED_DEBUG_SIMPLEFB
+	default "a8r8g8b8"
 
 config BOOTMETH_CROS
 	bool "Bootdev support for Chromium OS"

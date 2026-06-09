@@ -42,6 +42,19 @@ __weak int towed_boot_android_apply_dtbo_overlay(void *fdt_blob)
 	return 0;
 }
 
+__weak int towed_boot_android_debug_fdt(void *fdt_blob)
+{
+	(void)fdt_blob;
+
+	return 0;
+}
+
+static void towed_boot_android_fixup_fdt(void *fdt_blob)
+{
+	towed_boot_android_apply_dtbo_overlay(fdt_blob);
+	towed_boot_android_debug_fdt(fdt_blob);
+}
+
 #if CONFIG_IS_ENABLED(LEGACY_IMAGE_FORMAT)
 static const struct legacy_img_hdr *image_get_fdt(ulong fdt_addr)
 {
@@ -536,7 +549,7 @@ int boot_get_fdt(void *buf, const char *select, uint arch,
 
 			debug("## Using staged Android FDT at 0x%lx\n",
 			      staged_fdt_addr);
-			towed_boot_android_apply_dtbo_overlay(fdt_blob);
+			towed_boot_android_fixup_fdt(fdt_blob);
 			goto android_fdt_done;
 		}
 
@@ -551,7 +564,7 @@ int boot_get_fdt(void *buf, const char *select, uint arch,
 				goto no_fdt;
 
 			debug("## Using FDT in Android image dtb area with idx %u\n", dtb_idx);
-			towed_boot_android_apply_dtbo_overlay(fdt_blob);
+			towed_boot_android_fixup_fdt(fdt_blob);
 		} else if (!android_image_get_second(hdr, &fdt_data, &fdt_len) &&
 			!fdt_check_header((char *)fdt_data)) {
 			fdt_blob = (char *)fdt_data;
@@ -559,7 +572,7 @@ int boot_get_fdt(void *buf, const char *select, uint arch,
 				goto error;
 
 			debug("## Using FDT in Android image second area\n");
-			towed_boot_android_apply_dtbo_overlay(fdt_blob);
+			towed_boot_android_fixup_fdt(fdt_blob);
 		} else {
 			fdt_addr = env_get_hex("fdtaddr", 0);
 			if (!fdt_addr)
@@ -570,7 +583,7 @@ int boot_get_fdt(void *buf, const char *select, uint arch,
 				goto no_fdt;
 
 			debug("## Using FDT at ${fdtaddr}=Ox%lx\n", fdt_addr);
-			towed_boot_android_apply_dtbo_overlay(fdt_blob);
+			towed_boot_android_fixup_fdt(fdt_blob);
 		}
 
 android_fdt_done:

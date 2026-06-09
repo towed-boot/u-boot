@@ -62,6 +62,36 @@ static int towed_debug_set_bootarg(char **cmdline, const char *arg,
 	return 0;
 }
 
+static int towed_debug_append_raw_bootarg(char **cmdline, const char *arg)
+{
+	const char *old_cmdline = *cmdline ?: "";
+	char *new_cmdline;
+	size_t old_len, arg_len;
+
+	if (!arg || !*arg)
+		return 0;
+
+	old_len = strlen(old_cmdline);
+	arg_len = strlen(arg);
+
+	new_cmdline = malloc(old_len + !!old_len + arg_len + 1);
+	if (!new_cmdline)
+		return -ENOMEM;
+
+	if (old_len) {
+		strcpy(new_cmdline, old_cmdline);
+		strcat(new_cmdline, " ");
+		strcat(new_cmdline, arg);
+	} else {
+		strcpy(new_cmdline, arg);
+	}
+
+	free(*cmdline);
+	*cmdline = new_cmdline;
+
+	return 0;
+}
+
 static int towed_debug_apply_bootarg(char **cmdline, char *arg)
 {
 	char *value;
@@ -76,6 +106,57 @@ static int towed_debug_apply_bootarg(char **cmdline, char *arg)
 	}
 
 	return towed_debug_set_bootarg(cmdline, arg, BOOTFLOWCL_EMPTY);
+}
+
+static int towed_debug_apply_consoles(char **cmdline, const char *consoles)
+{
+	char *args, *console, *orig;
+	int ret;
+
+	if (!consoles || !*consoles)
+		return 0;
+
+	ret = towed_debug_set_bootarg(cmdline, "console", NULL);
+	if (ret < 0)
+		return ret;
+
+	args = strdup(consoles);
+	if (!args)
+		return -ENOMEM;
+	orig = args;
+
+	console = strsep(&args, " ");
+	while (console) {
+		if (*console) {
+			if (!strncmp(console, "console=", 8)) {
+				ret = towed_debug_append_raw_bootarg(cmdline,
+								     console);
+			} else {
+				char *console_arg;
+
+				console_arg = malloc(strlen(console) + 9);
+				if (!console_arg) {
+					free(orig);
+					return -ENOMEM;
+				}
+
+				sprintf(console_arg, "console=%s", console);
+				ret = towed_debug_append_raw_bootarg(cmdline,
+								     console_arg);
+				free(console_arg);
+			}
+			if (ret < 0) {
+				free(orig);
+				return ret;
+			}
+		}
+
+		console = strsep(&args, " ");
+	}
+
+	free(orig);
+
+	return 0;
 }
 
 static int towed_debug_apply_bootargs(char **cmdline, const char *extra_args)
@@ -109,23 +190,27 @@ static int towed_debug_apply_bootargs(char **cmdline, const char *extra_args)
 
 static int towed_debug_update_android_bootargs(char **cmdline)
 {
-	const char *console, *extra_args;
+	const char *consoles, *extra_args;
 	int ret;
 
 	if (!IS_ENABLED(CONFIG_TOWED_DEBUG))
 		return 0;
 
-	console = env_get("towed_debug_console");
-	if (!console || !*console)
-		console = CONFIG_IS_ENABLED(TOWED_DEBUG,
-					    (CONFIG_TOWED_DEBUG_ANDROID_CONSOLE),
-					    (""));
+	consoles = env_get("towed_debug_consoles");
+	if (!consoles || !*consoles)
+		consoles = env_get("towed_debug_console");
+	if (!consoles || !*consoles)
+		consoles = CONFIG_IS_ENABLED(TOWED_DEBUG,
+					     (CONFIG_TOWED_DEBUG_ANDROID_CONSOLES),
+					     (""));
+	if (!consoles || !*consoles)
+		consoles = CONFIG_IS_ENABLED(TOWED_DEBUG,
+					     (CONFIG_TOWED_DEBUG_ANDROID_CONSOLE),
+					     (""));
 
-	if (console && *console) {
-		ret = towed_debug_set_bootarg(cmdline, "console", console);
-		if (ret < 0)
-			return ret;
-	}
+	ret = towed_debug_apply_consoles(cmdline, consoles);
+	if (ret < 0)
+		return ret;
 
 	ret = towed_debug_set_bootarg(cmdline, "quiet", NULL);
 	if (ret < 0)
