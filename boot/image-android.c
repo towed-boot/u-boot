@@ -222,7 +222,13 @@ static int towed_debug_update_android_bootargs(char **cmdline)
 					       (CONFIG_TOWED_DEBUG_ANDROID_BOOTARGS),
 					       (""));
 
-	return towed_debug_apply_bootargs(cmdline, extra_args);
+	ret = towed_debug_apply_bootargs(cmdline, extra_args);
+	if (ret < 0)
+		return ret;
+
+	puts("Towed-Boot: Android kernel debug logging enabled\n");
+
+	return 0;
 }
 
 static bool android_boot_image_v0_v1_v2_page_size_valid(const struct andr_boot_img_hdr_v0 *hdr)
@@ -659,6 +665,9 @@ int android_image_get_kernel(const void *hdr,
 		free(newbootargs);
 		return ret;
 	}
+
+	if (IS_ENABLED(CONFIG_TOWED_DEBUG))
+		printf("Towed-Boot: final Android bootargs: %s\n", newbootargs);
 
 	env_set("bootargs", newbootargs);
 	free(newbootargs);

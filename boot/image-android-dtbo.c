@@ -13,8 +13,10 @@
 #include <malloc.h>
 #include <mapmem.h>
 #include <stdio.h>
+#include <string.h>
 
 #define TOWED_ANDROID_DTBO_ADDR_ENV "towed_android_dtbo_addr"
+#define TOWED_ANDROID_DTBO_MODEL_ENV "adtbo_model"
 
 static int towed_boot_android_set_simplefb_reg(void *fdt_blob, int node,
 					       u64 addr, u64 size)
@@ -132,6 +134,85 @@ static bool towed_boot_android_dtbo_count(ulong dtbo_addr, u32 *count)
 	return true;
 }
 
+static const char *towed_boot_android_dtbo_model_match(void)
+{
+	const char *model;
+
+	model = env_get(TOWED_ANDROID_DTBO_MODEL_ENV);
+	if (model && *model)
+		return model;
+
+	return CONFIG_TOWED_BOOT_ANDROID_DTBO_MODEL;
+}
+
+static const char *towed_boot_android_dtbo_model(const void *overlay,
+						 int *model_len)
+{
+	int root;
+
+	root = fdt_path_offset(overlay, "/");
+	if (root < 0)
+		return NULL;
+
+	return fdt_getprop(overlay, root, "model", model_len);
+}
+
+static void towed_boot_android_print_dtbo_meta(const void *overlay,
+					       u32 dtbo_index)
+{
+	const fdt32_t *board_id;
+	const char *model;
+	int len;
+
+	model = towed_boot_android_dtbo_model(overlay, &len);
+	if (model && len > 0 && model[len - 1] == '\0')
+		printf("Towed-Boot: DTBO index %u model: %s\n",
+		       dtbo_index, model);
+
+	board_id = fdt_getprop(overlay, 0, "qcom,board-id", &len);
+	if (board_id && len >= sizeof(fdt32_t) * 2)
+		printf("Towed-Boot: DTBO index %u board-id=<0x%x 0x%x>\n",
+		       dtbo_index, fdt32_to_cpu(board_id[0]),
+		       fdt32_to_cpu(board_id[1]));
+}
+
+static bool towed_boot_android_dtbo_model_matches(ulong overlay_addr,
+						  u32 overlay_size,
+						  const char *match,
+						  u32 dtbo_index)
+{
+	const char *model;
+	void *overlay;
+	bool matches = false;
+	int len;
+
+	if (!match || !*match)
+		return false;
+
+	overlay = map_sysmem(overlay_addr, overlay_size);
+	if (fdt_check_header(overlay)) {
+		if (IS_ENABLED(CONFIG_TOWED_DEBUG))
+			printf("Towed-Boot: DTBO index %u has no model FDT\n",
+			       dtbo_index);
+		goto out;
+	}
+
+	model = towed_boot_android_dtbo_model(overlay, &len);
+	if (!model || len <= 0 || model[len - 1] != '\0')
+		goto out;
+
+	if (strstr(model, match))
+		matches = true;
+	else if (IS_ENABLED(CONFIG_TOWED_DEBUG))
+		printf("Towed-Boot: DTBO index %u model mismatch: %s\n",
+		       dtbo_index, model);
+
+out:
+	unmap_sysmem(overlay);
+
+	return matches;
+}
+
 static int towed_boot_android_try_dtbo(void *fdt_blob, ulong overlay_addr,
 				       u32 overlay_size, u32 dtbo_index)
 {
@@ -146,6 +227,7 @@ static int towed_boot_android_try_dtbo(void *fdt_blob, ulong overlay_addr,
 		unmap_sysmem(overlay);
 		return -EINVAL;
 	}
+	towed_boot_android_print_dtbo_meta(overlay, dtbo_index);
 
 	ret = fdt_increase_size(fdt_blob, overlay_size + SZ_8K);
 	if (ret) {
@@ -195,10 +277,30 @@ static int towed_boot_android_try_dtbo(void *fdt_blob, ulong overlay_addr,
 	return 0;
 }
 
+static int towed_boot_android_apply_dtbo_index(void *fdt_blob, ulong dtbo_addr,
+					       u32 count, u32 dtbo_index)
+{
+	ulong overlay_addr;
+	u32 overlay_size;
+
+	if (dtbo_index >= count ||
+	    !android_dt_get_fdt_by_index(dtbo_addr, dtbo_index, &overlay_addr,
+					 &overlay_size)) {
+		printf("Towed-Boot: DTBO index %u not found\n", dtbo_index);
+		return -ENOENT;
+	}
+
+	return towed_boot_android_try_dtbo(fdt_blob, overlay_addr, overlay_size,
+					   dtbo_index);
+}
+
 int towed_boot_android_apply_dtbo_overlay(void *fdt_blob)
 {
+	const char *dtbo_index_env, *model_match;
 	ulong dtbo_addr, overlay_addr;
-	u32 count, dtbo_index, overlay_size, i;
+	bool have_dtbo_index_env;
+	u32 count, dtbo_index, i;
+	u32 overlay_size;
 	int ret;
 
 	dtbo_addr = env_get_hex(TOWED_ANDROID_DTBO_ADDR_ENV, 0);
@@ -211,17 +313,50 @@ int towed_boot_android_apply_dtbo_overlay(void *fdt_blob)
 		return 0;
 	}
 
+	dtbo_index_env = env_get("adtbo_idx");
+	have_dtbo_index_env = dtbo_index_env && *dtbo_index_env;
 	dtbo_index = env_get_ulong("adtbo_idx", 10,
 				   CONFIG_TOWED_BOOT_ANDROID_DTBO_INDEX);
-	if (dtbo_index < count &&
-	    android_dt_get_fdt_by_index(dtbo_addr, dtbo_index,
-					&overlay_addr, &overlay_size)) {
-		ret = towed_boot_android_try_dtbo(fdt_blob, overlay_addr,
-						  overlay_size, dtbo_index);
+
+	if (have_dtbo_index_env) {
+		ret = towed_boot_android_apply_dtbo_index(fdt_blob, dtbo_addr,
+							  count, dtbo_index);
 		if (!ret)
 			return 0;
-	} else {
-		printf("Towed-Boot: DTBO index %u not found\n", dtbo_index);
+	}
+
+	model_match = towed_boot_android_dtbo_model_match();
+	if (model_match && *model_match) {
+		printf("Towed-Boot: scanning %u DTBO entries for model \"%s\"\n",
+		       count, model_match);
+		for (i = 0; i < count; i++) {
+			if (have_dtbo_index_env && i == dtbo_index)
+				continue;
+			if (!android_dt_get_fdt_by_index(dtbo_addr, i,
+							 &overlay_addr,
+							 &overlay_size))
+				continue;
+			if (!towed_boot_android_dtbo_model_matches(overlay_addr,
+								   overlay_size,
+								   model_match,
+								   i))
+				continue;
+
+			ret = towed_boot_android_try_dtbo(fdt_blob,
+							  overlay_addr,
+							  overlay_size, i);
+			if (!ret)
+				return 0;
+		}
+		printf("Towed-Boot: no DTBO model match for \"%s\"\n",
+		       model_match);
+	}
+
+	if (!have_dtbo_index_env) {
+		ret = towed_boot_android_apply_dtbo_index(fdt_blob, dtbo_addr,
+							  count, dtbo_index);
+		if (!ret)
+			return 0;
 	}
 
 	printf("Towed-Boot: scanning %u DTBO entries for a usable overlay\n",

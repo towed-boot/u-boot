@@ -594,6 +594,16 @@ config TOWED_BOOT_ANDROID_DTBO_INDEX
 	  Default DTBO table index used when the adtbo_idx environment variable
 	  is not set. Boards can override this when index 0 is just a stub.
 
+config TOWED_BOOT_ANDROID_DTBO_MODEL
+	string "Default Android DTBO model substring"
+	depends on TOWED_BOOT_ANDROID
+	default ""
+	help
+	  Optional substring used to prefer an Android DTBO overlay by its root
+	  model property before falling back to the configured table index. Boards
+	  with vendor DTBO tables full of same-SoC overlays can use this to avoid
+	  booting the first overlay that merely applies cleanly.
+
 config TOWED_DEBUG
 	bool "Towed-Boot Android kernel debug logging"
 	depends on TOWED_BOOT_ANDROID
